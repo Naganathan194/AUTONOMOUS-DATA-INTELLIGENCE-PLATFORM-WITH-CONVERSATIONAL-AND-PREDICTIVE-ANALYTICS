@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataSet Querying LLM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+        body { background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0a0e27 100%); min-height: 100vh; }
+        .glass-card { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); }
+        .gradient-text { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+        .gradient-button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transition: all 0.3s ease; }
+        .gradient-button:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4); }
+        .gradient-button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .insight-card { background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%); border-left: 4px solid #667eea; transition: all 0.3s ease; }
+        .insight-card:hover { transform: translateX(5px); border-left-color: #764ba2; }
+        .loader { border: 3px solid rgba(255, 255, 255, 0.1); border-top: 3px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .dataset-pill { transition: all 0.3s ease; cursor: pointer; }
+        .dataset-pill:hover { transform: scale(1.05); }
+        .dataset-pill.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .tab-active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .chat-bubble { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        input[type="file"] { display: none; }
+        .pagination-button { padding: 0.5rem 1rem; border-radius: 0.5rem; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); transition: all 0.3s ease; }
+        .pagination-button:hover:not(:disabled) { background: rgba(102, 126, 234, 0.3); }
+        .pagination-button:disabled { opacity: 0.3; cursor: not-allowed; }
+        .pagination-button.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .faq-suggestion { min-width: 180px; white-space: normal; box-shadow: 0 2px 8px 0 rgba(102,126,234,0.10); cursor:pointer; font-size:15px; } .faq-suggestion:hover { background: linear-gradient(135deg,#764ba2 0%,#667eea 100%) !important; }
+    </style>
+</head>
+<body class="text-white">
+    <!-- Header -->
+    <header class="glass-card py-6 px-8 mb-8">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center">
+                    <span class="text-2xl">🌀</span>
+                </div>
+                <div>
+                    <h1 class="text-3xl font-bold gradient-text">DataSet Querying LLM</h1>
+                    <p class="text-sm text-gray-400">AI-Powered Data Analysis Platform</p>
+                </div>
+            </div>
+            <button onclick="showUploadModal()" class="gradient-button px-6 py-2 rounded-lg font-semibold text-white">
+                📤 Upload Dataset
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-8 pb-20">
+        <!-- Welcome Screen -->
+        <div id="welcomeScreen" class="text-center py-20">
+            <div class="glass-card p-12 rounded-2xl max-w-2xl mx-auto">
+                <div class="text-6xl mb-6">📊</div>
+                <h2 class="text-4xl font-bold mb-4 gradient-text">Welcome to Your Data Lab</h2>
+                <p class="text-gray-300 text-lg mb-8">Upload your datasets and unlock powerful AI-driven insights in seconds</p>
+                <button onclick="showUploadModal()" class="gradient-button px-8 py-4 rounded-xl font-bold text-lg text-white inline-flex items-center space-x-2">
+                    <span>🚀</span>
+                    <span>Get Started</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Dashboard -->
+        <div id="dashboard" class="hidden">
+            <!-- Dataset Switcher -->
+            <div id="datasetSwitcher" class="glass-card p-4 rounded-xl mb-6 overflow-x-auto">
+                <div class="flex space-x-3" id="datasetList"></div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="glass-card p-6 rounded-xl border-l-4 border-purple-500">
+                    <div class="text-sm text-gray-400 mb-2">Total Rows</div>
+                    <div id="statRows" class="text-3xl font-bold">0</div>
+                </div>
+                <div class="glass-card p-6 rounded-xl border-l-4 border-pink-500">
+                    <div class="text-sm text-gray-400 mb-2">Total Columns</div>
+                    <div id="statColumns" class="text-3xl font-bold">0</div>
+                </div>
+                <div class="glass-card p-6 rounded-xl border-l-4 border-blue-500">
+                    <div class="text-sm text-gray-400 mb-2">Active Dataset</div>
+                    <div id="statDataset" class="text-lg font-semibold truncate">-</div>
+                </div>
+                <div class="glass-card p-6 rounded-xl">
+                    <button onclick="exportPPT()" class="gradient-button w-full py-3 rounded-lg font-semibold text-white">
+                        📥 Export Report
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="glass-card p-2 rounded-xl mb-6">
+                <div class="flex space-x-2 overflow-x-auto">
+                    <button onclick="switchTab('overview')" id="tab-overview" class="tab-active px-6 py-3 rounded-lg font-semibold whitespace-nowrap">📊 Overview</button>
+                    <button onclick="switchTab('numerical')" id="tab-numerical" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🔢 Numerical</button>
+                    <button onclick="switchTab('categorical')" id="tab-categorical" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📚 Categorical</button>
+                    <button onclick="switchTab('correlations')" id="tab-correlations" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📈 Correlations</button>
+                    <button onclick="switchTab('outliers')" id="tab-outliers" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">⚠️ Outliers</button>
+                    <button onclick="switchTab('timeseries')" id="tab-timeseries" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📅 Time Series</button>
+                    <button onclick="switchTab('insights')" id="tab-insights" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">💡 AI Insights</button>
+                    <button onclick="switchTab('chat')" id="tab-chat" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🤖 Ask AI</button>
+                    <button onclick="switchTab('explorer')" id="tab-explorer" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🔍 Explorer</button>
+                </div>
+            </div>
+
+            <!-- Tab Content -->
+            <div id="tabContent" class="glass-card p-8 rounded-2xl min-h-96"></div>
+        </div>
+    </main>
+
+    <!-- Upload Modal -->
+    <div id="uploadModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+        <div class="glass-card p-8 rounded-2xl max-w-md w-full mx-4">
+            <h3 class="text-2xl font-bold mb-6 gradient-text">Upload Dataset</h3>
+            <label for="fileInput" class="block p-12 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
+                <div class="text-5xl mb-4">📁</div>
+                <p class="text-lg font-semibold mb-2">Click to upload or drag & drop</p>
+                <p class="text-sm text-gray-400">CSV or XLSX files supported</p>
+                <p class="text-xs text-gray-500 mt-2">You can upload multiple datasets</p>
+            </label>
+            <input type="file" id="fileInput" accept=".csv,.xlsx" onchange="handleFileUpload(event)">
+            <div id="uploadProgress" class="hidden mt-6">
+                <div class="flex items-center justify-center space-x-3">
+                    <div class="loader"></div>
+                    <span class="text-sm">Processing your dataset...</span>
+                </div>
+            </div>
+            <button onclick="closeUploadModal()" class="mt-6 w-full py-3 rounded-lg bg-white/5 hover:bg-white/10 font-semibold">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        // API Configuration
+        let API_BASE = window.location.origin;
+        
+        if (window.location.protocol === 'file:') {
+            API_BASE = 'http://localhost:8000';
+            console.warn('File opened directly. Defaulting API to:', API_BASE);
+        }
+        else if (window.location.port && ['3000', '5173', '8080', '4200'].includes(window.location.port)) {
+            API_BASE = `http://${window.location.hostname}:8000`;
+            console.log('Frontend dev server detected. API base set to:', API_BASE);
+        }
+        
+        const savedApiBase = localStorage.getItem('API_BASE');
+        if (savedApiBase) {
+            API_BASE = savedApiBase;
+            console.log('Using saved API base:', API_BASE);
+        }
+        
+        console.log('API Base URL:', API_BASE);
+        
+        let currentDatasetId = null;
+        let allDatasets = [];
+        let chatHistory = [];
+        let chatMessages = []; // Store chat messages for session persistence
+        let explorerPagination = { page: 1, pageSize: 50, totalPages: 1 };
+        let queryPagination = { page: 1, pageSize: 50, totalPages: 1 };
+
+        async function loadDatasets() {
+            try {
+                const response = await fetch(`${API_BASE}/api/datasets`);
+                const data = await response.json();
+                allDatasets = data.datasets;
+                updateDatasetSwitcher();
+            } catch (error) {
+                console.error('Failed to load datasets:', error);
+            }
+        }
+
+        function updateDatasetSwitcher() {
+            const container = document.getElementById('datasetList');
+            if (!allDatasets.length) {
+                container.innerHTML = '<p class="text-gray-400 text-sm">No datasets uploaded</p>';
+                return;
+            }
+            
+            container.innerHTML = allDatasets.map(ds => `
+                <div onclick="switchDataset('${ds.id}')" 
+                     class="dataset-pill ${ds.id === currentDatasetId ? 'active' : 'bg-white/5'} px-6 py-3 rounded-lg flex items-center space-x-2 whitespace-nowrap cursor-pointer transition-all">
+                    <span class="text-xl">📊</span>
+                    <div class="flex-1 min-w-0">
+                        <div class="font-semibold truncate">${ds.filename}</div>
+                        <div class="text-xs text-gray-400">${ds.rows.toLocaleString()} rows • ${ds.columns} cols</div>
+                    </div>
+                    <button onclick="deleteDataset(event, '${ds.id}')" class="ml-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 px-2 py-1 rounded transition">✕</button>
+                </div>
+            `).join('');
+        }
+
+        async function switchDataset(datasetId) {
+            currentDatasetId = datasetId;
+            chatHistory = [];
+            chatMessages = []; // Clear chat messages when switching dataset
+            explorerPagination = { page: 1, pageSize: 50, totalPages: 1 };
+            queryPagination = { page: 1, pageSize: 50, totalPages: 1 };
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/dataset/${datasetId}`);
+                const data = await response.json();
+                
+                document.getElementById('statRows').textContent = data.rows.toLocaleString();
+                document.getElementById('statColumns').textContent = data.columns;
+                document.getElementById('statDataset').textContent = data.filename;
+                
+                updateDatasetSwitcher();
+                switchTab('overview');
+            } catch (error) {
+                alert('Failed to load dataset');
+            }
+        }
+
+        async function deleteDataset(event, datasetId) {
+            event.stopPropagation();
+            if (!confirm('Delete this dataset?')) return;
+            
+            try {
+                await fetch(`${API_BASE}/api/dataset/${datasetId}`, { method: 'DELETE' });
+                allDatasets = allDatasets.filter(ds => ds.id !== datasetId);
+                
+                if (datasetId === currentDatasetId) {
+                    if (allDatasets.length > 0) {
+                        await switchDataset(allDatasets[0].id);
+                    } else {
+                        document.getElementById('welcomeScreen').classList.remove('hidden');
+                        document.getElementById('dashboard').classList.add('hidden');
+                    }
+                }
+                updateDatasetSwitcher();
+            } catch (error) {
+                alert('Failed to delete dataset');
+            }
+        }
+
+        function showUploadModal() {
+            document.getElementById('uploadModal').classList.remove('hidden');
+        }
+
+        function closeUploadModal() {
+            document.getElementById('uploadModal').classList.add('hidden');
+        }
+
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const fileExtension = file.name.toLowerCase().split('.').pop();
+            if (!['csv', 'xlsx'].includes(fileExtension)) {
+                alert('Please upload a CSV or XLSX file');
+                event.target.value = '';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            document.getElementById('uploadProgress').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`${API_BASE}/api/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    let errorMessage = 'Unknown error';
+                    try {
+                        const errorData = await response.json();
+                        errorMessage = errorData.detail || errorData.message || `HTTP ${response.status}: ${response.statusText}`;
+                    } catch (e) {
+                        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const data = await response.json();
+                
+                    await loadDatasets();
+                currentDatasetId = data.dataset_id;
+                await switchDataset(data.dataset_id);
+                    
+                    document.getElementById('welcomeScreen').classList.add('hidden');
+                    document.getElementById('dashboard').classList.remove('hidden');
+                    
+                    closeUploadModal();
+                    switchTab('overview');
+            } catch (error) {
+                console.error('Upload error:', error);
+                let errorMsg = error.message || 'Failed to upload file';
+                
+                if (error.message === 'Failed to fetch' || error.message.includes('fetch')) {
+                    errorMsg = `Cannot connect to backend server at ${API_BASE}.\n\n` +
+                              'Please ensure:\n' +
+                              '1. Backend server is running (python main.py)\n' +
+                              '2. Server is running on port 8000\n' +
+                              '3. Check browser console (F12) for details';
+                }
+                
+                alert('Upload failed: ' + errorMsg);
+            } finally {
+                document.getElementById('uploadProgress').classList.add('hidden');
+                event.target.value = '';
+            }
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('[id^="tab-"]').forEach(tab => {
+                tab.classList.remove('tab-active');
+            });
+            document.getElementById(`tab-${tabName}`).classList.add('tab-active');
+
+            const content = document.getElementById('tabContent');
+            content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
+
+            switch(tabName) {
+                case 'overview': loadOverview(); break;
+                case 'numerical': loadNumerical(); break;
+                case 'categorical': loadCategorical(); break;
+                case 'correlations': loadCorrelations(); break;
+                case 'outliers': loadOutliers(); break;
+                case 'timeseries': loadTimeSeries(); break;
+                case 'insights': loadInsights(); break;
+                case 'chat': loadChat(); break;
+                case 'explorer': loadExplorer(); break;
+            }
+        }
+
+        async function loadOverview() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/api/dataset/${currentDatasetId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const data = await response.json();
+                
+                const cols = data.eda && data.eda.columns ? Object.entries(data.eda.columns).slice(0, 10) : [];
+                const preview = data.preview || [];
+                
+                let html = `
+                    <h2 class="text-3xl font-bold mb-6 gradient-text">Dataset Overview</h2>
+                    <div class="space-y-6">
+                        <div class="glass-card p-6 rounded-xl">
+                            <h3 class="text-xl font-semibold mb-4">Column Information</h3>
+                            <div class="overflow-x-auto">
+                                <table class="w-full">
+                                    <thead>
+                                        <tr class="border-b border-white/10">
+                                            <th class="text-left py-3 px-4">Column</th>
+                                            <th class="text-left py-3 px-4">Type</th>
+                                            <th class="text-left py-3 px-4">Missing</th>
+                                            <th class="text-left py-3 px-4">Unique</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>`;
+                
+                if (cols.length > 0) {
+                cols.forEach(([col, details]) => {
+                    // Check if column is unique (primary key) - show Yes/No instead of count
+                    const isUnique = details.is_unique === true || (details.unique_count && details.unique_count === data.rows);
+                    const uniqueDisplay = isUnique ? '<span class="text-green-400 font-semibold">Yes</span>' : '<span class="text-gray-400">No</span>';
+                    
+                    html += `
+                        <tr class="border-b border-white/5 hover:bg-white/5">
+                            <td class="py-3 px-4 font-semibold">${col}</td>
+                            <td class="py-3 px-4">${details.dtype || 'N/A'}</td>
+                            <td class="py-3 px-4">${details.missing_count || 0} (${(details.missing_percent || 0).toFixed(1)}%)</td>
+                            <td class="py-3 px-4">${uniqueDisplay}</td>
+                        </tr>`;
+                });
+                } else {
+                    html += `<tr><td colspan="4" class="py-4 text-center text-gray-400">No column information available</td></tr>`;
+                }
+                
+                html += `</tbody></table></div></div>`;
+                
+                if (preview.length > 0) {
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">Sample Data</h3>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead><tr class="border-b border-white/10">`;
+                
+                    Object.keys(preview[0]).forEach(key => {
+                        html += `<th class="text-left py-2 px-3 font-semibold">${key}</th>`;
+                });
+                
+                html += `</tr></thead><tbody>`;
+                
+                    preview.slice(0, 10).forEach(row => {
+                    html += '<tr class="border-b border-white/5 hover:bg-white/5">';
+                    Object.values(row).forEach(val => {
+                            const displayVal = val !== null && val !== undefined ? String(val) : '-';
+                            html += `<td class="py-2 px-3">${displayVal.length > 100 ? displayVal.substring(0, 100) + '...' : displayVal}</td>`;
+                    });
+                    html += '</tr>';
+                });
+                
+                    html += `</tbody></table></div></div>`;
+                }
+                
+                html += `</div>`;
+                
+                document.getElementById('tabContent').innerHTML = html;
+            } catch (error) {
+                console.error('Overview error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load overview</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadNumerical() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+                
+                const response = await fetch(`${API_BASE}/api/analyze/${currentDatasetId}/numerical`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                }
+                const data = await response.json();
+                
+                if (!data.visualizations || data.visualizations.length === 0) {
+                    document.getElementById('tabContent').innerHTML = `
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">📊</div>
+                            <h2 class="text-2xl font-bold mb-2 gradient-text">No Numerical Columns Found</h2>
+                            <p class="text-gray-400">This dataset doesn't contain any numerical columns to analyze.</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = `<h2 class="text-3xl font-bold mb-6 gradient-text">Numerical Analysis</h2>
+                           <p class="text-gray-300 mb-6">Found ${data.count} numeric column${data.count !== 1 ? 's' : ''}</p>`;
+                
+                if (data.statistics && Object.keys(data.statistics).length > 0) {
+                    html += `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">`;
+                    Object.entries(data.statistics).slice(0, 6).forEach(([col, stats]) => {
+                        html += `
+                            <div class="glass-card p-4 rounded-xl">
+                                <h4 class="font-semibold mb-2 text-purple-300">${col}</h4>
+                                <div class="text-sm space-y-1">
+                                    <div>Mean: <span class="text-gray-300">${stats.mean.toFixed(2)}</span></div>
+                                    <div>Median: <span class="text-gray-300">${stats.median.toFixed(2)}</span></div>
+                                    <div>Std: <span class="text-gray-300">${stats.std.toFixed(2)}</span></div>
+                                    <div>Range: <span class="text-gray-300">${stats.min.toFixed(2)} - ${stats.max.toFixed(2)}</span></div>
+                                    ${stats.outlier_count > 0 ? `<div class="text-yellow-400">Outliers: ${stats.outlier_count} (${stats.outlier_percentage}%)</div>` : ''}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                
+                data.visualizations.forEach((viz, idx) => {
+                    const uniqueId = `plot-${viz.column}-${viz.type}-${idx}`;
+                    html += `<div class="mb-8 glass-card p-6 rounded-xl"><div id="${uniqueId}" style="min-height: 450px;"></div></div>`;
+                });
+                
+                document.getElementById('tabContent').innerHTML = html;
+                
+                setTimeout(() => {
+                    // Check if Plotly is loaded
+                    if (typeof Plotly === 'undefined') {
+                        console.error('Plotly library not loaded!');
+                        document.getElementById('tabContent').innerHTML += `
+                            <div class="text-center py-8 text-red-400">
+                                <p>Plotly library failed to load. Please refresh the page.</p>
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    data.visualizations.forEach((viz, idx) => {
+                        const uniqueId = `plot-${viz.column}-${viz.type}-${idx}`;
+                        const element = document.getElementById(uniqueId);
+                        
+                        if (!element) {
+                            console.error(`Element ${uniqueId} not found in DOM`);
+                            return;
+                        }
+                        
+                        try {
+                            // Validate figure structure
+                            if (!viz.figure || !viz.figure.data || !viz.figure.layout) {
+                                console.error(`Invalid figure structure for ${uniqueId}:`, viz);
+                                element.innerHTML = '<p class="text-red-400">Invalid visualization data</p>';
+                                return;
+                            }
+                            
+                            Plotly.newPlot(uniqueId, viz.figure.data, viz.figure.layout, {
+                                responsive: true,
+                                displayModeBar: true
+                            });
+                        } catch (plotError) {
+                            console.error(`Plot error for ${uniqueId}:`, plotError);
+                            element.innerHTML = `<p class="text-red-400">Failed to render visualization: ${plotError.message}</p>`;
+                        }
+                    });
+                }, 200);
+            } catch (error) {
+                console.error('Numerical analysis error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load numerical analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadCategorical() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+                
+                const response = await fetch(`${API_BASE}/api/analyze/${currentDatasetId}/categorical`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                }
+                const data = await response.json();
+                
+                if (!data.visualizations || data.visualizations.length === 0) {
+                    document.getElementById('tabContent').innerHTML = `
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">📚</div>
+                            <h2 class="text-2xl font-bold mb-2 gradient-text">No Categorical Columns Found</h2>
+                            <p class="text-gray-400">This dataset doesn't contain any categorical columns to analyze.</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = `<h2 class="text-3xl font-bold mb-6 gradient-text">Categorical Analysis</h2>
+                           <p class="text-gray-300 mb-6">Found ${data.count} categorical column${data.count !== 1 ? 's' : ''}</p>`;
+                
+                data.visualizations.forEach((viz, idx) => {
+                    const uniqueId = `plot-cat-${viz.column}-${viz.type}-${idx}`;
+                    html += `<div class="mb-8 glass-card p-6 rounded-xl"><div id="${uniqueId}" style="min-height: 400px;"></div></div>`;
+                });
+                
+                document.getElementById('tabContent').innerHTML = html;
+                
+                setTimeout(() => {
+                    // Check if Plotly is loaded
+                    if (typeof Plotly === 'undefined') {
+                        console.error('Plotly library not loaded!');
+                        return;
+                    }
+                    
+                    data.visualizations.forEach((viz, idx) => {
+                        const uniqueId = `plot-cat-${viz.column}-${viz.type}-${idx}`;
+                        const element = document.getElementById(uniqueId);
+                        
+                        if (!element) {
+                            console.error(`Element ${uniqueId} not found in DOM`);
+                            return;
+                        }
+                        
+                        try {
+                            // Validate figure structure
+                            if (!viz.figure || !viz.figure.data || !viz.figure.layout) {
+                                console.error(`Invalid figure structure for ${uniqueId}:`, viz);
+                                element.innerHTML = '<p class="text-red-400">Invalid visualization data</p>';
+                                return;
+                            }
+                            
+                            Plotly.newPlot(uniqueId, viz.figure.data, viz.figure.layout, {
+                                responsive: true,
+                                displayModeBar: true
+                            });
+                        } catch (plotError) {
+                            console.error(`Plot error for ${uniqueId}:`, plotError);
+                            element.innerHTML = `<p class="text-red-400">Failed to render visualization: ${plotError.message}</p>`;
+                        }
+                    });
+                }, 200);
+            } catch (error) {
+                console.error('Categorical analysis error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load categorical analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadCorrelations() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/api/analyze/${currentDatasetId}/correlations`);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    if (response.status === 400) {
+                        document.getElementById('tabContent').innerHTML = `
+                            <div class="text-center py-12">
+                                <div class="text-6xl mb-4">📈</div>
+                                <h2 class="text-2xl font-bold mb-2 gradient-text">Insufficient Data</h2>
+                                <p class="text-gray-400">${errorText || 'Not enough numeric columns for correlation analysis'}</p>
+                            </div>
+                        `;
+                        return;
+                    }
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                
+                const data = await response.json();
+                
+                let html = `<h2 class="text-3xl font-bold mb-6 gradient-text">Correlation Analysis</h2>`;
+                
+                if (data.strong_correlations && data.strong_correlations.length > 0) {
+                    html += `<div class="glass-card p-6 rounded-xl mb-6">
+                            <h3 class="text-xl font-semibold mb-4">🔗 Strong Correlations (|r| ≥ 0.5)</h3>
+                            <div class="space-y-2">`;
+                    
+                    data.strong_correlations.forEach(corr => {
+                        const color = corr.correlation > 0 ? 'text-green-400' : 'text-red-400';
+                        const strength = Math.abs(corr.correlation);
+                        const strengthClass = strength > 0.7 ? 'bg-green-500/20' : strength > 0.5 ? 'bg-yellow-500/20' : 'bg-blue-500/20';
+                        html += `<div class="flex justify-between items-center p-3 bg-white/5 rounded hover:bg-white/10 transition ${strengthClass}">
+                                <span class="font-medium">${corr.col1} ↔ ${corr.col2}</span>
+                                <span class="${color} font-bold text-lg">${corr.correlation.toFixed(3)}</span>
+                            </div>`;
+                    });
+                    
+                    html += `</div></div>`;
+                } else {
+                    html += `<div class="glass-card p-4 rounded-xl mb-6 bg-yellow-500/10 border border-yellow-500/30">
+                        <p class="text-yellow-300">No strong correlations found (|r| ≥ 0.5)</p>
+                    </div>`;
+                }
+                
+                if (data.visualizations && data.visualizations.length > 0) {
+                    html += `<div class="glass-card p-6 rounded-xl"><div id="correlation-heatmap" style="min-height: 600px;"></div></div>`;
+                }
+                
+                document.getElementById('tabContent').innerHTML = html;
+                
+                if (data.visualizations && data.visualizations.length > 0) {
+                    setTimeout(() => {
+                        // Check if Plotly is loaded
+                        if (typeof Plotly === 'undefined') {
+                            console.error('Plotly library not loaded!');
+                            const heatmapDiv = document.getElementById('correlation-heatmap');
+                            if (heatmapDiv) {
+                                heatmapDiv.innerHTML = '<p class="text-red-400">Plotly library failed to load. Please refresh the page.</p>';
+                            }
+                            return;
+                        }
+                        
+                        const heatmapDiv = document.getElementById('correlation-heatmap');
+                        if (!heatmapDiv) {
+                            console.error('Correlation heatmap element not found');
+                            return;
+                        }
+                        
+                        try {
+                            const viz = data.visualizations[0];
+                            // Validate figure structure
+                            if (!viz.figure || !viz.figure.data || !viz.figure.layout) {
+                                console.error('Invalid heatmap figure structure:', viz);
+                                heatmapDiv.innerHTML = '<p class="text-red-400">Invalid heatmap data structure</p>';
+                                return;
+                            }
+                            
+                            Plotly.newPlot('correlation-heatmap', viz.figure.data, 
+                                          viz.figure.layout, {
+                                              responsive: true,
+                                              displayModeBar: true
+                                          });
+                        } catch (plotError) {
+                            console.error('Correlation heatmap plot error:', plotError);
+                            heatmapDiv.innerHTML = `<p class="text-red-400">Failed to render heatmap: ${plotError.message}</p>`;
+                        }
+                    }, 200);
+                }
+            } catch (error) {
+                console.error('Correlations error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load correlation analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadInsights() {
+            const content = document.getElementById('tabContent');
+            content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
+
+            try {
+                if (!currentDatasetId) {
+                    content.innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/api/insights/${currentDatasetId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const data = await response.json();
+                
+                const sectionIcons = {
+                    'Data Overview': '📊',
+                    'Data Quality': '✅',
+                    'Key Patterns': '🔍',
+                    'Notable Findings': '💡',
+                    'Recommendations': '🎯',
+                    'Insights': '✨',
+                    'Summary': '📋'
+                };
+                
+                let html = `
+                    <div class="mb-8">
+                        <h2 class="text-4xl font-bold mb-3 gradient-text flex items-center space-x-3">
+                            <span>✨</span>
+                            <span>AI-Generated Insights</span>
+                        </h2>
+                        <p class="text-gray-400 text-lg">Key findings and recommendations for your data</p>
+                    </div>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">`;
+                
+                data.insights.slice(0, 2).forEach((section, idx) => {
+                    const icon = sectionIcons[section.title] || '📌';
+                    html += `
+                        <div class="glass-card p-8 rounded-2xl border-2 border-purple-500/30 bg-gradient-to-br from-purple-500/10 to-pink-500/10 transform hover:scale-105 transition-all duration-300">
+                            <div class="flex items-center space-x-3 mb-6">
+                                <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center text-2xl">
+                                    ${icon}
+                                </div>
+                                <h3 class="text-2xl font-bold text-purple-300">
+                                ${section.title}
+                            </h3>
+                            </div>
+                            <div class="space-y-4">`;
+                    
+                    section.items.forEach((item, itemIdx) => {
+                        html += `
+                            <div class="flex items-start space-x-3 p-4 bg-white/5 rounded-lg hover:bg-white/10 transition">
+                                <div class="flex-shrink-0 w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center font-bold text-sm mt-0.5">
+                                    ${itemIdx + 1}
+                                </div>
+                                <p class="text-gray-100 text-base leading-relaxed flex-1">${item}</p>
+                            </div>`;
+                    });
+                    
+                    html += `</div></div>`;
+                });
+
+                html += `</div>`;
+
+                if (data.insights.length > 2) {
+                    html += `<div class="space-y-6">`;
+                    
+                    data.insights.slice(2).forEach(section => {
+                        const icon = sectionIcons[section.title] || '📌';
+                        html += `
+                            <div class="glass-card p-6 rounded-xl border-l-4 border-purple-500 hover:border-pink-500 transition">
+                                <div class="flex items-center space-x-3 mb-4">
+                                    <span class="text-3xl">${icon}</span>
+                                    <h3 class="text-xl font-bold text-purple-300">
+                                        ${section.title}
+                                    </h3>
+                                </div>
+                                <div class="space-y-3">`;
+                    
+                    section.items.forEach(item => {
+                        html += `
+                                <div class="flex items-start space-x-3 pl-4 border-l-2 border-purple-500/30">
+                                    <span class="text-purple-400 font-bold mt-1">▸</span>
+                                    <p class="text-gray-200 leading-relaxed">${item}</p>
+                                </div>`;
+                    });
+                    
+                        html += `</div></div>`;
+                });
+                
+                html += `</div>`;
+                }
+                
+                content.innerHTML = html;
+            } catch (error) {
+                console.error('Insights error:', error);
+                content.innerHTML = `
+                    <div class="text-center py-12">
+                        <div class="text-6xl mb-4">😕</div>
+                        <p class="text-red-400 text-lg mb-2">Failed to load insights</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadOutliers() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+                
+                const response = await fetch(`${API_BASE}/api/analyze/${currentDatasetId}/outliers`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                }
+                const data = await response.json();
+                
+                if (!data.visualizations || data.visualizations.length === 0) {
+                    document.getElementById('tabContent').innerHTML = `
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">⚠️</div>
+                            <h2 class="text-2xl font-bold mb-2 gradient-text">No Outliers Data Available</h2>
+                            <p class="text-gray-400">${data.message || 'No numeric columns found for outlier analysis'}</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = `<h2 class="text-3xl font-bold mb-6 gradient-text">Outlier Detection Analysis</h2>
+                           <p class="text-gray-300 mb-6">Detected outliers using IQR and Z-score methods</p>`;
+                
+                if (data.statistics && Object.keys(data.statistics).length > 0) {
+                    html += `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">`;
+                    Object.entries(data.statistics).forEach(([col, stats]) => {
+                        html += `
+                            <div class="glass-card p-4 rounded-xl">
+                                <h4 class="font-semibold mb-2 text-purple-300">${col}</h4>
+                                <div class="text-sm space-y-1">
+                                    <div>IQR Outliers: <span class="text-red-400">${stats.iqr_outliers_count} (${stats.iqr_outliers_percentage}%)</span></div>
+                                    <div>Z-Score Outliers: <span class="text-orange-400">${stats.zscore_outliers_count} (${stats.zscore_outliers_percentage}%)</span></div>
+                                    <div>Bounds: <span class="text-gray-300">${stats.lower_bound.toFixed(2)} - ${stats.upper_bound.toFixed(2)}</span></div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                
+                data.visualizations.forEach((viz, idx) => {
+                    const uniqueId = `plot-outlier-${viz.column}-${idx}`;
+                    html += `<div class="mb-8 glass-card p-6 rounded-xl"><div id="${uniqueId}" style="min-height: 450px;"></div></div>`;
+                });
+                
+                document.getElementById('tabContent').innerHTML = html;
+                
+                setTimeout(() => {
+                    if (typeof Plotly === 'undefined') {
+                        console.error('Plotly library not loaded!');
+                        return;
+                    }
+                    
+                    data.visualizations.forEach((viz, idx) => {
+                        const uniqueId = `plot-outlier-${viz.column}-${idx}`;
+                        const element = document.getElementById(uniqueId);
+                        
+                        if (!element) {
+                            console.error(`Element ${uniqueId} not found in DOM`);
+                            return;
+                        }
+                        
+                        try {
+                            if (!viz.figure || !viz.figure.data || !viz.figure.layout) {
+                                console.error(`Invalid figure structure for ${uniqueId}:`, viz);
+                                element.innerHTML = '<p class="text-red-400">Invalid visualization data</p>';
+                                return;
+                            }
+                            
+                            Plotly.newPlot(uniqueId, viz.figure.data, viz.figure.layout, {
+                                responsive: true,
+                                displayModeBar: true
+                            });
+                        } catch (plotError) {
+                            console.error(`Plot error for ${uniqueId}:`, plotError);
+                            element.innerHTML = `<p class="text-red-400">Failed to render visualization: ${plotError.message}</p>`;
+                        }
+                    });
+                }, 200);
+            } catch (error) {
+                console.error('Outliers analysis error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load outliers analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadTimeSeries() {
+            try {
+                if (!currentDatasetId) {
+                    document.getElementById('tabContent').innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+                
+                const response = await fetch(`${API_BASE}/api/analyze/${currentDatasetId}/timeseries`);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    if (response.status === 400) {
+                        document.getElementById('tabContent').innerHTML = `
+                            <div class="text-center py-12">
+                                <div class="text-6xl mb-4">📅</div>
+                                <h2 class="text-2xl font-bold mb-2 gradient-text">Time Series Analysis Not Available</h2>
+                                <p class="text-gray-400">${errorText || 'Time series analysis requires at least one date/time column and one numeric column'}</p>
+                            </div>
+                        `;
+                        return;
+                    }
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Check if time series was detected
+                if (data.message === "No time series detected" || data.error || !data.visualizations || data.visualizations.length === 0) {
+                    document.getElementById('tabContent').innerHTML = `
+                        <div class="text-center py-12">
+                            <div class="text-6xl mb-4">📅</div>
+                            <h2 class="text-2xl font-bold mb-2 gradient-text">No Time Series Detected</h2>
+                            <p class="text-gray-400">${data.error || data.message || 'Dataset does not contain valid sequential date/time data or timestamp columns for time series analysis.'}</p>
+                            ${data.date_columns_found !== undefined ? `<p class="text-gray-500 text-sm mt-2">Date columns found: ${data.date_columns_found}, Numeric columns found: ${data.numeric_columns_found || 0}</p>` : ''}
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = `<h2 class="text-3xl font-bold mb-6 gradient-text">Time Series Analysis</h2>`;
+                
+                if (data.analyses && Object.keys(data.analyses).length > 0) {
+                    html += `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">`;
+                    Object.entries(data.analyses).forEach(([key, analysis]) => {
+                        html += `
+                            <div class="glass-card p-4 rounded-xl">
+                                <h4 class="font-semibold mb-2 text-purple-300">${analysis.value_column} over ${analysis.date_column}</h4>
+                                <div class="text-sm space-y-1">
+                                    <div>Period: <span class="text-gray-300">${analysis.start_date.substring(0,10)} to ${analysis.end_date.substring(0,10)}</span></div>
+                                    <div>Data Points: <span class="text-gray-300">${analysis.data_points}</span></div>
+                                    <div>Trend: <span class="text-${analysis.trend_direction === 'increasing' ? 'green' : 'red'}-400">${analysis.trend_direction}</span></div>
+                                    <div>Mean: <span class="text-gray-300">${analysis.mean.toFixed(2)}</span></div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                
+                data.visualizations.forEach((viz, idx) => {
+                    const uniqueId = `plot-timeseries-${viz.unique_id}-${idx}`;
+                    html += `<div class="mb-8 glass-card p-6 rounded-xl"><div id="${uniqueId}" style="min-height: 500px;"></div></div>`;
+                });
+                
+                document.getElementById('tabContent').innerHTML = html;
+                
+                setTimeout(() => {
+                    if (typeof Plotly === 'undefined') {
+                        console.error('Plotly library not loaded!');
+                        return;
+                    }
+                    
+                    data.visualizations.forEach((viz, idx) => {
+                        const uniqueId = `plot-timeseries-${viz.unique_id}-${idx}`;
+                        const element = document.getElementById(uniqueId);
+                        
+                        if (!element) {
+                            console.error(`Element ${uniqueId} not found in DOM`);
+                            return;
+                        }
+                        
+                        try {
+                            if (!viz.figure || !viz.figure.data || !viz.figure.layout) {
+                                console.error(`Invalid figure structure for ${uniqueId}:`, viz);
+                                element.innerHTML = '<p class="text-red-400">Invalid visualization data</p>';
+                                return;
+                            }
+                            
+                            Plotly.newPlot(uniqueId, viz.figure.data, viz.figure.layout, {
+                                responsive: true,
+                                displayModeBar: true
+                            });
+                        } catch (plotError) {
+                            console.error(`Plot error for ${uniqueId}:`, plotError);
+                            element.innerHTML = `<p class="text-red-400">Failed to render visualization: ${plotError.message}</p>`;
+                        }
+                    });
+                }, 200);
+            } catch (error) {
+                console.error('Time series error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load time series analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+
+        function formatChatResponse(text) {
+            if (!text) return '';
+            
+            // Replace <br> tags with newlines first
+            text = text.replace(/<br\s*\/?>/gi, '\n');
+            
+            // Split by lines
+            const lines = text.split('\n');
+            let formattedLines = [];
+            let inSection = false;
+            
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
+                if (!line) {
+                    if (formattedLines.length > 0 && !formattedLines[formattedLines.length - 1].endsWith('</div>')) {
+                        formattedLines.push('');
+                    }
+                    continue;
+                }
+                
+                // Check for headers BEFORE escaping HTML (to preserve & for matching)
+                let isMajorHeader = false;
+                let isSubHeader = false;
+                
+                // Detect major section headers (longer titles, ending with colon, may have &)
+                // Pattern: Starts with capital, has text, ends with colon, optionally followed by blank line
+                if (line.match(/^[A-Z][^:]{10,60}:\s*$/) && (i < lines.length - 1 && lines[i + 1].trim() === '' || i === 0)) {
+                    isMajorHeader = true;
+                }
+                
+                // Detect subsection headers (shorter, single word or two words before colon, may include &)
+                // Match patterns like "Age:", "Gender:", "Smoking Status:", etc.
+                if (!isMajorHeader && line.match(/^[A-Z][A-Za-z\s&]+:\s*$/) && line.length < 40) {
+                    isSubHeader = true;
+                }
+                
+                // Escape HTML after checking headers
+                const originalLine = line;
+                line = line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                
+                if (isMajorHeader) {
+                    const headerText = originalLine.replace(':', '');
+                    // Escape header text separately
+                    const escapedHeader = headerText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    formattedLines.push(`<div class="mt-6 mb-4"><div class="flex items-center space-x-3 mb-3"><div class="w-1 h-8 bg-gradient-to-b from-purple-500 to-pink-500 rounded"></div><h3 class="text-xl font-bold text-purple-300">${escapedHeader}</h3></div></div>`);
+                    inSection = true;
+                    continue;
+                }
+                
+                if (isSubHeader) {
+                    const subHeaderText = originalLine.replace(':', '');
+                    // Escape subheader text separately
+                    const escapedSubHeader = subHeaderText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    formattedLines.push(`<div class="mt-4 mb-2 ml-4"><h4 class="text-base font-semibold text-purple-200 flex items-center space-x-2"><span class="text-lg">▸</span><span>${escapedSubHeader}</span></h4></div>`);
+                    continue;
+                }
+                
+                // Detect bullet points (starts with - or •)
+                if (line.match(/^[-•]\s+/)) {
+                    const bulletText = line.replace(/^[-•]\s+/, '');
+                    // Highlight numbers in bullet text
+                    const bulletWithHighlights = bulletText.replace(/(\d+\.?\d*)/g, '<span class="font-bold text-yellow-300">$1</span>');
+                    formattedLines.push(`<div class="flex items-start space-x-3 py-2 ml-6"><span class="text-purple-400 mt-1 text-lg">•</span><span class="flex-1 text-gray-200">${bulletWithHighlights}</span></div>`);
+                    continue;
+                }
+                
+                // Detect numbered lists
+                if (line.match(/^\d+[.)]\s+/)) {
+                    const match = line.match(/^(\d+)[.)]\s+(.+)$/);
+                    if (match) {
+                        const num = match[1];
+                        const content = match[2];
+                        const contentWithHighlights = content.replace(/(\d+\.?\d*)/g, '<span class="font-bold text-yellow-300">$1</span>');
+                        formattedLines.push(`<div class="flex items-start space-x-3 py-2 ml-6"><span class="text-purple-400 font-semibold w-8">${num}.</span><span class="flex-1 text-gray-200">${contentWithHighlights}</span></div>`);
+                    }
+                    continue;
+                }
+                
+                // Regular paragraph text
+                // Highlight numbers and key phrases
+                let processedLine = line;
+                
+                // Highlight numbers
+                processedLine = processedLine.replace(/(\d+\.?\d*)/g, '<span class="font-bold text-yellow-300">$1</span>');
+                
+                // Highlight common statistical terms
+                processedLine = processedLine.replace(/\b(average|mean|median|approximately|about|around|total|count|cases?)\b/gi, '<span class="font-semibold text-purple-200">$1</span>');
+                
+                formattedLines.push(`<p class="mb-3 text-gray-200 leading-relaxed ml-4">${processedLine}</p>`);
+            }
+            
+            let html = formattedLines.join('\n');
+            
+            // Wrap sections in cards for better visual organization
+            const sections = html.split(/(<div class="mt-6 mb-4"><div[^>]*><h3[^>]*>.*?<\/h3><\/div><\/div>)/);
+            let finalHtml = '';
+            
+            for (let i = 0; i < sections.length; i++) {
+                let section = sections[i].trim();
+                if (!section) continue;
+                
+                // If it's a major header
+                if (section.includes('<h3 class="text-xl')) {
+                    finalHtml += section;
+                } else if (section.includes('<h4') || section.includes('<div class="flex items-start') || section.includes('<p class="mb-3')) {
+                    // Content section - wrap in a card for visual separation
+                    finalHtml += `<div class="bg-white/5 rounded-xl p-4 mb-4 border border-white/10">${section}</div>`;
+                } else {
+                    finalHtml += section;
+                }
+            }
+            
+            // If no sections were detected, wrap everything in a card
+            if (!finalHtml || finalHtml === html) {
+                finalHtml = `<div class="bg-white/5 rounded-xl p-4 mb-4">${html}</div>`;
+            }
+            
+            // Add a quick summary box at the end if there are many metrics
+            const metrics = html.match(/<span class="font-bold text-yellow-300">(\d+\.?\d*)<\/span>/g);
+            if (metrics && metrics.length > 3) {
+                finalHtml += '<div class="mt-6 pt-4 border-t-2 border-purple-500/30"><div class="bg-gradient-to-br from-purple-500/20 via-pink-500/20 to-purple-500/20 rounded-xl p-5 border border-purple-500/30"><div class="flex items-start space-x-3"><span class="text-2xl">💡</span><div><h4 class="font-bold text-purple-300 mb-2">Quick Reference</h4><p class="text-sm text-gray-300 leading-relaxed">Key metrics are highlighted in <span class="font-bold text-yellow-300">yellow</span> throughout this analysis. Use the section headers above to quickly navigate to specific topics.</p></div></div></div></div>';
+            }
+            
+            return finalHtml || html;
+        }
+
+        function loadChat() {
+            const content = document.getElementById('tabContent');
+            // Define sample FAQ questions
+            const suggestedQuestions = [
+                "What are the key trends in this dataset?",
+                "Do you notice any significant outliers?",
+                "How do the variables correlate?",
+                "What time-based patterns are present?",
+                "Any suggestions for further analysis?"
+            ];
+
+            let faqHtml = `
+            <div class="mb-6">
+                <div class="font-bold mb-2 text-gray-200 text-lg flex items-center gap-2">
+                    <span class="text-2xl">💬</span>
+                    Frequently Asked Questions
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    ${suggestedQuestions.map(q => `
+                        <button class="faq-suggestion gradient-button px-4 py-2 rounded-lg text-white font-semibold"
+                            type="button"
+                            onclick="handleFaqClick('${q.replace(/'/g, "\\'")}')"
+                        >${q}</button>`).join('')}
+                </div>
+            </div>`;
+
+            content.innerHTML = `
+                <h2 class="text-3xl font-bold mb-6 gradient-text">Ask AI About Your Data</h2>
+                ${faqHtml}
+                <div class="space-y-6">
+                    <div id="chatMessages" class="glass-card p-6 rounded-xl h-96 overflow-y-auto space-y-4">
+                        ${chatMessages.length === 0 ? '<div class="text-center text-gray-400 py-8">👋 Hi! Ask me anything about your dataset. I can help you understand patterns, relationships, and insights.</div>' : chatMessages.join('')}
+                    </div>
+                    <div class="flex space-x-4">
+                        <input 
+                            type="text" 
+                            id="chatInput" 
+                            placeholder="e.g., What are the main patterns in this data?"
+                            class="flex-1 bg-white/5 border border-white/10 rounded-xl px-6 py-4 focus:outline-none focus:border-purple-500"
+                            onkeypress="if(event.key==='Enter') sendMessage()"
+                        >
+                        <button onclick="sendMessage()" class="gradient-button px-8 py-4 rounded-xl font-semibold">
+                            Send
+                        </button>
+                    </div>
+                </div>`;
+            
+            // Scroll to bottom after loading messages
+            setTimeout(() => {
+                const messagesContainer = document.getElementById('chatMessages');
+                if (messagesContainer) {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                }
+            }, 100);
+        }
+
+        // Handles clicking on the FAQ suggestion questions
+        function handleFaqClick(question) {
+            const input = document.getElementById('chatInput');
+            if (!input) return;
+            input.value = question;
+            sendMessage();
+        }
+
+        // Add a little extra style for FAQ buttons
+        // (inject once per load)
+        if (!window.__faqInjected) {
+            const style = document.createElement('style');
+            style.innerHTML = `.faq-suggestion { min-width: 180px; white-space: normal; box-shadow: 0 2px 8px 0 rgba(102,126,234,0.10); cursor:pointer; font-size:15px; } .faq-suggestion:hover { background: linear-gradient(135deg,#764ba2 0%,#667eea 100%) !important; }`;
+            document.head.appendChild(style);
+            window.__faqInjected = true;
+        }
+
+        async function sendMessage() {
+            if (!currentDatasetId) {
+                alert('Please select a dataset first');
+                return;
+            }
+
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message) return;
+
+            const messagesContainer = document.getElementById('chatMessages');
+            const originalPlaceholder = messagesContainer.querySelector('.text-center');
+            if (originalPlaceholder) {
+                originalPlaceholder.remove();
+            }
+            
+            // Store user message in chatMessages array
+            const userMessageHtml = `
+                <div class="chat-bubble flex justify-end mb-4">
+                    <div class="bg-gradient-to-r from-purple-500 to-pink-500 px-6 py-3 rounded-2xl max-w-md shadow-lg">
+                        ${message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+                    </div>
+                </div>`;
+            
+            chatMessages.push(userMessageHtml);
+            messagesContainer.innerHTML = chatMessages.join('');
+            
+            input.value = '';
+            input.disabled = true;
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            const loadingId = 'loading-' + Date.now();
+            const loadingHtml = `
+                <div class="chat-bubble flex justify-start mb-4" id="${loadingId}">
+                    <div class="bg-white/10 px-6 py-3 rounded-2xl flex items-center space-x-2">
+                        <div class="loader" style="width: 20px; height: 20px; border-width: 2px;"></div>
+                        <span class="text-gray-400">Thinking...</span>
+                    </div>
+                </div>`;
+            
+            chatMessages.push(loadingHtml);
+            messagesContainer.innerHTML = chatMessages.join('');
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dataset_id: currentDatasetId,
+                        message: message,
+                        history: chatHistory || []
+                    })
+                });
+
+                // Remove loading message
+                chatMessages = chatMessages.filter(msg => !msg.includes(loadingId));
+                messagesContainer.innerHTML = chatMessages.join('');
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                // Format the response to be more attractive and structured
+                const formattedResponse = formatChatResponse(data.response);
+                
+                // Store AI response in chatMessages array
+                const aiMessageHtml = `
+                    <div class="chat-bubble flex justify-start mb-4">
+                        <div class="bg-white/10 px-6 py-5 rounded-2xl max-w-3xl shadow-lg">
+                            ${formattedResponse}
+                        </div>
+                    </div>`;
+                
+                chatMessages.push(aiMessageHtml);
+                messagesContainer.innerHTML = chatMessages.join('');
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                
+                // Also update chatHistory for backend context
+                chatHistory.push({ user: message, ai: data.response });
+            } catch (error) {
+                // Remove loading message
+                chatMessages = chatMessages.filter(msg => !msg.includes(loadingId));
+                messagesContainer.innerHTML = chatMessages.join('');
+
+                console.error('Chat error:', error);
+                
+                // Store error message
+                const errorMessageHtml = `
+                    <div class="chat-bubble flex justify-start mb-4">
+                        <div class="bg-red-500/20 border border-red-500/30 px-6 py-3 rounded-2xl max-w-md">
+                            <p class="font-semibold text-red-300 mb-1">Sorry, I encountered an error</p>
+                            <p class="text-red-400 text-sm">${error.message || 'Please try again'}</p>
+                        </div>
+                    </div>`;
+                
+                chatMessages.push(errorMessageHtml);
+                messagesContainer.innerHTML = chatMessages.join('');
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            } finally {
+                input.disabled = false;
+                input.focus();
+            }
+        }
+
+        function loadExplorer() {
+            const content = document.getElementById('tabContent');
+            explorerPagination = { page: 1, pageSize: 50, totalPages: 1 };
+            content.innerHTML = `
+                <h2 class="text-3xl font-bold mb-6 gradient-text">Data Explorer</h2>
+                <div class="space-y-6">
+                    <div class="glass-card p-6 rounded-xl">
+                        <label class="block text-sm font-semibold mb-2">Natural Language Query</label>
+                        <div class="flex space-x-4">
+                            <input 
+                                type="text" 
+                                id="explorerQuery" 
+                                placeholder="e.g., Show me records where age > 30 and salary > 50000"
+                                class="flex-1 bg-white/5 border border-white/10 rounded-xl px-6 py-4 focus:outline-none focus:border-purple-500"
+                                onkeypress="if(event.key==='Enter') executeQuery()"
+                            >
+                            <button onclick="executeQuery()" class="gradient-button px-8 py-4 rounded-xl font-semibold">
+                                Execute
+                            </button>
+                        </div>
+                    </div>
+                    <div id="explorerResults" class="glass-card p-6 rounded-xl">
+                        <p class="text-gray-400 text-center py-8">Enter a query to explore your data, or leave blank to view all records (paginated)</p>
+                        <div class="text-center mt-4">
+                            <button onclick="executeQuery()" class="gradient-button px-6 py-3 rounded-lg font-semibold">
+                                View All Records
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        async function executeQuery(page = 1) {
+            const query = document.getElementById('explorerQuery').value.trim();
+
+            const resultsDiv = document.getElementById('explorerResults');
+            resultsDiv.innerHTML = '<div class="flex justify-center py-8"><div class="loader"></div></div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dataset_id: currentDatasetId,
+                        query: query || "Show all records",
+                        page: page,
+                        page_size: 50
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Handle pagination safely - backend doesn't return pagination yet
+                    if (data.pagination) {
+                        queryPagination = data.pagination;
+                    } else {
+                        // No pagination from backend, show all results
+                        queryPagination = { page: 1, total_pages: 1, page_size: data.data.length };
+                    }
+                    
+                    let html = `
+                        <div class="mb-4 flex justify-between items-center">
+                            <div>
+                                <h3 class="text-xl font-bold">Results: ${data.rows.toLocaleString()} row${data.rows !== 1 ? 's' : ''} found</h3>
+                                ${data.total_rows ? `<p class="text-sm text-gray-400">From ${data.total_rows.toLocaleString()} total rows in dataset</p>` : ''}
+                        </div>
+                            <div class="text-sm text-gray-400 max-w-md truncate" title="${data.pandas_query || data.sql_query || 'Filter applied'}">${data.pandas_query || data.sql_query || 'Filter applied'}</div>
+                        </div>`;
+                    
+                    // Pagination controls at top (only if pagination exists and has multiple pages)
+                    if (queryPagination && queryPagination.total_pages > 1) {
+                        html += renderPaginationControls('query');
+                    }
+                    
+                    html += `
+                        <div class="overflow-x-auto my-4">
+                            <table class="w-full text-sm">
+                                <thead><tr class="border-b border-white/10">`;
+                    
+                    data.columns.forEach(col => {
+                        html += `<th class="text-left py-2 px-3 font-semibold">${col}</th>`;
+                    });
+                    
+                    html += `</tr></thead><tbody>`;
+                    
+                    data.data.forEach(row => {
+                        html += '<tr class="border-b border-white/5 hover:bg-white/5">';
+                        data.columns.forEach(col => {
+                            const cellValue = row[col] !== null && row[col] !== undefined ? String(row[col]) : '-';
+                            html += `<td class="py-2 px-3">${cellValue.length > 100 ? cellValue.substring(0, 100) + '...' : cellValue}</td>`;
+                        });
+                        html += '</tr>';
+                    });
+                    
+                    html += `</tbody></table></div>`;
+                    
+                    // Pagination controls at bottom (only if pagination exists and has multiple pages)
+                    if (queryPagination && queryPagination.total_pages > 1) {
+                        html += renderPaginationControls('query');
+                    }
+                    
+                    // Show record count info safely
+                    if (data.data.length < data.rows) {
+                        html += `
+                            <div class="mt-4 text-center text-gray-400 text-sm">
+                                Showing ${data.data.length.toLocaleString()} of ${data.rows.toLocaleString()} matching records
+                            </div>
+                        `;
+                    } else {
+                        html += `
+                            <div class="mt-4 text-center text-gray-400 text-sm">
+                                Showing all ${data.rows.toLocaleString()} matching records
+                            </div>
+                        `;
+                    }
+                    
+                    resultsDiv.innerHTML = html;
+                } else {
+                    resultsDiv.innerHTML = `<div class="text-center py-8">
+                        <p class="text-yellow-400 mb-2">${data.message || 'No results found'}</p>
+                        <p class="text-sm text-gray-400">${data.pandas_query || data.sql_query || ''}</p>
+                    </div>`;
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="text-center py-8 text-red-400">Error: ${error.message}</div>`;
+            }
+        }
+
+        function renderPaginationControls(type) {
+            const pagination = type === 'query' ? queryPagination : explorerPagination;
+            
+            // Safety check - if pagination is undefined, return empty string
+            if (!pagination || !pagination.total_pages) {
+                return '';
+            }
+            
+            const clickHandler = type === 'query' ? 'executeQuery' : 'loadExplorerPage';
+            
+            let html = `<div class="flex items-center justify-center space-x-2 my-6">`;
+            
+            // First page
+            html += `<button onclick="${clickHandler}(1)" ${pagination.page === 1 ? 'disabled' : ''} 
+                     class="pagination-button" title="First page">«</button>`;
+            
+            // Previous page
+            html += `<button onclick="${clickHandler}(${pagination.page - 1})" ${!pagination.has_prev ? 'disabled' : ''} 
+                     class="pagination-button" title="Previous page">‹</button>`;
+            
+            // Page numbers
+            const maxButtons = 7;
+            let startPage = Math.max(1, pagination.page - Math.floor(maxButtons / 2));
+            let endPage = Math.min(pagination.total_pages, startPage + maxButtons - 1);
+            
+            if (endPage - startPage + 1 < maxButtons) {
+                startPage = Math.max(1, endPage - maxButtons + 1);
+            }
+            
+            if (startPage > 1) {
+                html += `<button onclick="${clickHandler}(1)" class="pagination-button">1</button>`;
+                if (startPage > 2) {
+                    html += `<span class="text-gray-400 px-2">...</span>`;
+                }
+            }
+            
+            for (let i = startPage; i <= endPage; i++) {
+                html += `<button onclick="${clickHandler}(${i})" 
+                         class="pagination-button ${i === pagination.page ? 'active' : ''}">${i}</button>`;
+            }
+            
+            if (endPage < pagination.total_pages) {
+                if (endPage < pagination.total_pages - 1) {
+                    html += `<span class="text-gray-400 px-2">...</span>`;
+                }
+                html += `<button onclick="${clickHandler}(${pagination.total_pages})" class="pagination-button">${pagination.total_pages}</button>`;
+            }
+            
+            // Next page
+            html += `<button onclick="${clickHandler}(${pagination.page + 1})" ${!pagination.has_next ? 'disabled' : ''} 
+                     class="pagination-button" title="Next page">›</button>`;
+            
+            // Last page
+            html += `<button onclick="${clickHandler}(${pagination.total_pages})" ${pagination.page === pagination.total_pages ? 'disabled' : ''} 
+                     class="pagination-button" title="Last page">»</button>`;
+            
+            html += `</div>`;
+            
+            return html;
+        }
+
+        async function loadExplorerPage(page) {
+            const resultsDiv = document.getElementById('explorerResults');
+            resultsDiv.innerHTML = '<div class="flex justify-center py-8"><div class="loader"></div></div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/explore`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dataset_id: currentDatasetId,
+                        page: page,
+                        page_size: 50
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    explorerPagination = data.pagination;
+                    
+                    let html = `
+                        <div class="mb-4 flex justify-between items-center">
+                            <div>
+                                <h3 class="text-xl font-bold">Total Records: ${data.pagination.total_rows.toLocaleString()}</h3>
+                                <p class="text-xs text-gray-500 mt-1">Page ${explorerPagination.page} of ${explorerPagination.total_pages}</p>
+                            </div>
+                        </div>`;
+                    
+                    // Pagination controls at top
+                    if (explorerPagination.total_pages > 1) {
+                        html += renderPaginationControls('explorer');
+                    }
+                    
+                    html += `
+                        <div class="overflow-x-auto my-4">
+                            <table class="w-full text-sm">
+                                <thead><tr class="border-b border-white/10">`;
+                    
+                    data.columns.forEach(col => {
+                        html += `<th class="text-left py-2 px-3 font-semibold">${col.name}</th>`;
+                    });
+                    
+                    html += `</tr></thead><tbody>`;
+                    
+                    data.data.forEach(row => {
+                        html += '<tr class="border-b border-white/5 hover:bg-white/5">';
+                        data.columns.forEach(col => {
+                            const cellValue = row[col.name] !== null && row[col.name] !== undefined ? String(row[col.name]) : '-';
+                            html += `<td class="py-2 px-3">${cellValue.length > 100 ? cellValue.substring(0, 100) + '...' : cellValue}</td>`;
+                        });
+                        html += '</tr>';
+                    });
+                    
+                    html += `</tbody></table></div>`;
+                    
+                    // Pagination controls at bottom
+                    if (explorerPagination.total_pages > 1) {
+                        html += renderPaginationControls('explorer');
+                    }
+                    
+                    html += `<div class="mt-4 text-center text-gray-400 text-sm">
+                        Showing ${data.data.length} records on page ${explorerPagination.page} of ${explorerPagination.total_pages}
+                    </div>`;
+                    
+                    resultsDiv.innerHTML = html;
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="text-center py-8 text-red-400">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function checkServerConnection() {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000);
+                
+                const response = await fetch(`${API_BASE}/api/datasets`, {
+                    method: 'GET',
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                return response.ok;
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.error('Server connection timeout. Is the backend running?');
+                } else {
+                    console.error('Server connection check failed:', error);
+                }
+                return false;
+            }
+        }
+
+        function showServerStatus(connected) {
+            if (!connected) {
+                console.error(`
+╔══════════════════════════════════════════════════════════════╗
+║  ⚠️  BACKEND SERVER NOT CONNECTED                            ║
+╠══════════════════════════════════════════════════════════════╣
+║  Please start the backend server:                             ║
+║                                                               ║
+║  python main.py                                               ║
+║                                                               ║
+║  Or: uvicorn main:app --reload                                ║
+║                                                               ║
+║  Server should be running on: ${API_BASE.padEnd(43)}║
+╚══════════════════════════════════════════════════════════════╝
+                `);
+            }
+        }
+
+        // Verify Plotly is loaded
+        function checkPlotlyLoaded() {
+            if (typeof Plotly === 'undefined') {
+                console.error('Plotly library not loaded! Make sure the CDN script is included.');
+                return false;
+            }
+            console.log('Plotly library loaded successfully');
+            return true;
+        }
+
+        window.addEventListener('load', async () => {
+            // Check if Plotly is loaded
+            if (!checkPlotlyLoaded()) {
+                console.warn('Plotly not available - visualizations may not work');
+            }
+            
+            const serverConnected = await checkServerConnection();
+            showServerStatus(serverConnected);
+            
+            if (serverConnected) {
+                await loadDatasets();
+                if (allDatasets.length > 0) {
+                    currentDatasetId = allDatasets[0].id;
+                    await switchDataset(allDatasets[0].id);
+                }
+            }
+        });
+
+        async function exportPPT() {
+            if (!currentDatasetId) {
+                alert('Please select a dataset first');
+                return;
+            }
+            window.open(`${API_BASE}/api/export/${currentDatasetId}/ppt`, '_blank');
+        }
+    </script>
+</body>
+</html>
