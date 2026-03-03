@@ -75,7 +75,7 @@
             </div>
 
             <!-- Stats Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
                 <div class="glass-card p-6 rounded-xl border-l-4 border-purple-500">
                     <div class="text-sm text-gray-400 mb-2">Total Rows</div>
                     <div id="statRows" class="text-3xl font-bold">0</div>
@@ -87,6 +87,10 @@
                 <div class="glass-card p-6 rounded-xl border-l-4 border-blue-500">
                     <div class="text-sm text-gray-400 mb-2">Active Dataset</div>
                     <div id="statDataset" class="text-lg font-semibold truncate">-</div>
+                </div>
+                <div id="healthScoreWidget" class="glass-card p-6 rounded-xl">
+                    <div class="text-xs text-gray-400">📊 Data Health</div>
+                    <div class="text-gray-500 text-sm mt-1">Loading…</div>
                 </div>
                 <div class="glass-card p-6 rounded-xl">
                     <button onclick="exportPPT()" class="gradient-button w-full py-3 rounded-lg font-semibold text-white">
@@ -105,6 +109,8 @@
                     <button onclick="switchTab('outliers')" id="tab-outliers" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">⚠️ Outliers</button>
                     <button onclick="switchTab('timeseries')" id="tab-timeseries" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📅 Time Series</button>
                     <button onclick="switchTab('insights')" id="tab-insights" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">💡 AI Insights</button>
+                    <button onclick="switchTab('predictive')" id="tab-predictive" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🧠 Predictive</button>
+                    <button onclick="switchTab('image_analysis')" id="tab-image_analysis" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🖼️ Image</button>
                     <button onclick="switchTab('chat')" id="tab-chat" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🤖 Ask AI</button>
                     <button onclick="switchTab('explorer')" id="tab-explorer" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🔍 Explorer</button>
                 </div>
@@ -117,19 +123,47 @@
 
     <!-- Upload Modal -->
     <div id="uploadModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-        <div class="glass-card p-8 rounded-2xl max-w-md w-full mx-4">
+        <div class="glass-card p-8 rounded-2xl max-w-lg w-full mx-4">
             <h3 class="text-2xl font-bold mb-6 gradient-text">Upload Dataset</h3>
-            <label for="fileInput" class="block p-12 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
-                <div class="text-5xl mb-4">📁</div>
-                <p class="text-lg font-semibold mb-2">Click to upload or drag & drop</p>
-                <p class="text-sm text-gray-400">CSV or XLSX files supported</p>
-                <p class="text-xs text-gray-500 mt-2">You can upload multiple datasets</p>
-            </label>
-            <input type="file" id="fileInput" accept=".csv,.xlsx" onchange="handleFileUpload(event)">
+
+            <!-- Tab switcher -->
+            <div class="flex space-x-2 mb-6">
+                <button onclick="setUploadMode('tabular')" id="uploadModeTabular"
+                    class="flex-1 py-2 rounded-lg font-semibold text-sm tab-active">
+                    📊 Tabular (CSV / XLSX)
+                </button>
+                <button onclick="setUploadMode('image')" id="uploadModeImage"
+                    class="flex-1 py-2 rounded-lg font-semibold text-sm bg-white/5 hover:bg-white/10">
+                    🖼️ Image Dataset (ZIP)
+                </button>
+            </div>
+
+            <!-- Tabular upload -->
+            <div id="tabularUploadArea">
+                <label for="fileInput" class="block p-10 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
+                    <div class="text-5xl mb-3">📁</div>
+                    <p class="text-lg font-semibold mb-1">Click to upload or drag & drop</p>
+                    <p class="text-sm text-gray-400">CSV or XLSX files supported</p>
+                    <p class="text-xs text-gray-500 mt-1">You can upload multiple datasets</p>
+                </label>
+                <input type="file" id="fileInput" accept=".csv,.xlsx" onchange="handleFileUpload(event)">
+            </div>
+
+            <!-- Image zip upload -->
+            <div id="imageUploadArea" class="hidden">
+                <label for="imageFileInput" class="block p-10 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
+                    <div class="text-5xl mb-3">🗜️</div>
+                    <p class="text-lg font-semibold mb-1">Upload ZIP of Images</p>
+                    <p class="text-sm text-gray-400">Organise images in sub-folders by class:</p>
+                    <p class="text-xs text-gray-500 mt-1">dataset.zip → cats/ dogs/ etc.</p>
+                </label>
+                <input type="file" id="imageFileInput" accept=".zip" onchange="handleImageUpload(event)">
+            </div>
+
             <div id="uploadProgress" class="hidden mt-6">
                 <div class="flex items-center justify-center space-x-3">
                     <div class="loader"></div>
-                    <span class="text-sm">Processing your dataset...</span>
+                    <span class="text-sm" id="uploadProgressText">Processing your dataset...</span>
                 </div>
             </div>
             <button onclick="closeUploadModal()" class="mt-6 w-full py-3 rounded-lg bg-white/5 hover:bg-white/10 font-semibold">Cancel</button>
@@ -205,14 +239,25 @@
             try {
                 const response = await fetch(`${API_BASE}/api/dataset/${datasetId}`);
                 const data = await response.json();
-                
-                document.getElementById('statRows').textContent = data.rows.toLocaleString();
-                document.getElementById('statColumns').textContent = data.columns;
+
+                const isImageDs = data.eda && data.eda.dataset_type === 'image';
+
+                document.getElementById('statRows').textContent = isImageDs
+                    ? (data.eda && data.eda.columns ? '—' : '—')
+                    : data.rows.toLocaleString();
+                document.getElementById('statColumns').textContent = isImageDs ? '—' : data.columns;
                 document.getElementById('statDataset').textContent = data.filename;
                 
                 updateDatasetSwitcher();
-                switchTab('overview');
+                loadHealthScore();
+
+                if (isImageDs) {
+                    switchTab('image_analysis');
+                } else {
+                    switchTab('overview');
+                }
             } catch (error) {
+                console.error('switchDataset error:', error);
                 alert('Failed to load dataset');
             }
         }
@@ -310,11 +355,129 @@
             }
         }
 
+        function setUploadMode(mode) {
+            const tabular = document.getElementById('tabularUploadArea');
+            const image = document.getElementById('imageUploadArea');
+            const btnTabular = document.getElementById('uploadModeTabular');
+            const btnImage = document.getElementById('uploadModeImage');
+            if (mode === 'tabular') {
+                tabular.classList.remove('hidden');
+                image.classList.add('hidden');
+                btnTabular.classList.add('tab-active');
+                btnTabular.classList.remove('bg-white/5');
+                btnImage.classList.remove('tab-active');
+                btnImage.classList.add('bg-white/5');
+            } else {
+                tabular.classList.add('hidden');
+                image.classList.remove('hidden');
+                btnImage.classList.add('tab-active');
+                btnImage.classList.remove('bg-white/5');
+                btnTabular.classList.remove('tab-active');
+                btnTabular.classList.add('bg-white/5');
+            }
+        }
+
+        async function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                alert('Please upload a ZIP file containing your image dataset.');
+                event.target.value = '';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const progressEl = document.getElementById('uploadProgress');
+            const progressText = document.getElementById('uploadProgressText');
+            progressEl.classList.remove('hidden');
+            if (progressText) progressText.textContent = 'Processing image dataset…';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/upload-images`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    let msg = 'Unknown error';
+                    try { const err = await response.json(); msg = err.detail || err.message || msg; } catch (e) {}
+                    throw new Error(msg);
+                }
+
+                const data = await response.json();
+                await loadDatasets();
+                currentDatasetId = data.dataset_id;
+
+                // Manually add to allDatasets list since image datasets are stored separately
+                if (!allDatasets.find(d => d.id === data.dataset_id)) {
+                    allDatasets.push({
+                        id: data.dataset_id,
+                        filename: data.filename,
+                        rows: data.stats.total_images,
+                        columns: data.stats.num_classes
+                    });
+                    updateDatasetSwitcher();
+                }
+
+                document.getElementById('welcomeScreen').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+                closeUploadModal();
+                // Go to predictive tab which will detect image dataset and show image analysis
+                switchTab('predictive');
+            } catch (error) {
+                console.error('Image upload error:', error);
+                alert('Image upload failed: ' + (error.message || 'Unknown error'));
+            } finally {
+                progressEl.classList.add('hidden');
+                if (progressText) progressText.textContent = 'Processing your dataset…';
+                event.target.value = '';
+            }
+        }
+
+        async function loadHealthScore() {
+            if (!currentDatasetId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/health-score/${currentDatasetId}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const h = data.health || {};
+                const score = h.overall ?? 0;
+                const grade = h.grade || '—';
+                const color = score >= 90 ? '#22c55e' : score >= 75 ? '#a855f7' : score >= 60 ? '#f59e0b' : '#ef4444';
+
+                const el = document.getElementById('healthScoreWidget');
+                if (!el) return;
+
+                el.innerHTML = `
+                    <div class="glass-card p-4 rounded-xl">
+                        <div class="text-xs text-gray-400 mb-2">📊 Data Health Score</div>
+                        <div class="flex items-center gap-3">
+                            <div style="width:48px;height:48px;position:relative">
+                                <svg viewBox="0 0 36 36" style="transform:rotate(-90deg);width:100%;height:100%">
+                                    <circle cx="18" cy="18" r="15.9" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="3"/>
+                                    <circle cx="18" cy="18" r="15.9" fill="none" stroke="${color}" stroke-width="3"
+                                        stroke-dasharray="${score} ${100 - score}" stroke-dashoffset="0"/>
+                                </svg>
+                                <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:${color}">${score}</div>
+                            </div>
+                            <div>
+                                <div class="font-bold" style="color:${color}">${grade}</div>
+                                <div class="text-xs text-gray-400">Completeness: ${h.completeness ?? '—'}%</div>
+                                <div class="text-xs text-gray-400">Uniqueness: ${h.uniqueness ?? '—'}%</div>
+                            </div>
+                        </div>
+                    </div>`;
+            } catch (e) { /* silent */ }
+        }
+
         function switchTab(tabName) {
             document.querySelectorAll('[id^="tab-"]').forEach(tab => {
                 tab.classList.remove('tab-active');
             });
-            document.getElementById(`tab-${tabName}`).classList.add('tab-active');
+            const tabEl = document.getElementById(`tab-${tabName}`);
+            if (tabEl) tabEl.classList.add('tab-active');
 
             const content = document.getElementById('tabContent');
             content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
@@ -327,6 +490,8 @@
                 case 'outliers': loadOutliers(); break;
                 case 'timeseries': loadTimeSeries(); break;
                 case 'insights': loadInsights(); break;
+                case 'predictive': loadPredictive(); break;
+                case 'image_analysis': loadImageAnalysis(); break;
                 case 'chat': loadChat(); break;
                 case 'explorer': loadExplorer(); break;
             }
@@ -384,6 +549,44 @@
                 }
                 
                 html += `</tbody></table></div></div>`;
+
+                if (data.profile) {
+                    const profile = data.profile;
+                    const missingCols = profile.top_missing_columns || [];
+                    const candidateTargets = profile.candidate_targets || [];
+                    const groups = profile.column_groups || {};
+
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h3 class="text-xl font-semibold mb-4">Data Profile Summary</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                            <div class="bg-white/5 p-4 rounded-lg">
+                                <div class="text-sm text-gray-400 mb-1">Sampling</div>
+                                <div class="text-base">${data.is_sampled ? 'Sampled for speed' : 'Full dataset'}<br>
+                                    <span class="text-xs text-gray-400">Rows used: ${profile.sampled_rows?.toLocaleString() || '-'} (${((profile.sample_ratio || 0) * 100).toFixed(2)}%)</span>
+                                </div>
+                            </div>
+                            <div class="bg-white/5 p-4 rounded-lg">
+                                <div class="text-sm text-gray-400 mb-1">Column Groups</div>
+                                <div class="text-sm">Numeric: ${groups.numeric ? groups.numeric.length : 0}</div>
+                                <div class="text-sm">Categorical: ${groups.categorical ? groups.categorical.length : 0}</div>
+                                <div class="text-sm">Datetime: ${groups.datetime ? groups.datetime.length : 0}</div>
+                                <div class="text-sm">Identifiers: ${groups.identifiers ? groups.identifiers.length : 0}</div>
+                            </div>
+                            <div class="bg-white/5 p-4 rounded-lg">
+                                <div class="text-sm text-gray-400 mb-1">Candidate Targets</div>
+                                <div class="text-sm">${candidateTargets.length ? candidateTargets.slice(0, 5).join(', ') : 'None detected'}</div>
+                            </div>
+                        </div>`;
+
+                    if (missingCols.length) {
+                        html += `<div class="bg-white/5 p-4 rounded-lg">
+                            <div class="text-sm text-gray-400 mb-2">Top Missing Columns</div>
+                            <div class="text-sm">${missingCols.map(m => `${m.column} (${m.missing_percent}%)`).join(', ')}</div>
+                        </div>`;
+                    }
+
+                    html += `</div>`;
+                }
                 
                 if (preview.length > 0) {
                     html += `<div class="glass-card p-6 rounded-xl">
@@ -1016,6 +1219,300 @@
                         <p class="text-gray-400 text-sm">${error.message}</p>
                     </div>
                 `;
+            }
+        }
+
+        async function loadPredictive() {
+            const content = document.getElementById('tabContent');
+            content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
+
+            try {
+                if (!currentDatasetId) {
+                    content.innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
+                    return;
+                }
+
+                const response = await fetch(`${API_BASE}/api/dataset/${currentDatasetId}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+
+                // Check if it is an image dataset
+                if (data.eda && data.eda.dataset_type === 'image') {
+                    await loadImageAnalysis();
+                    return;
+                }
+
+                const cols = data.eda && data.eda.columns ? Object.keys(data.eda.columns) : [];
+                const profileTargets = data.profile && data.profile.candidate_targets ? data.profile.candidate_targets : [];
+                const options = cols.map(c => `<option value="${c}">${c}</option>`).join('');
+                const suggested = profileTargets.length
+                    ? `🎯 AI-suggested targets: <span class="text-purple-300 font-semibold">${profileTargets.slice(0, 5).join(', ')}</span>`
+                    : 'No target suggestions available';
+
+                content.innerHTML = `
+                    <h2 class="text-3xl font-bold mb-2 gradient-text">🤖 AutoML Predictive Analysis</h2>
+                    <p class="text-gray-400 mb-6 text-sm">Runs 5–6 models in parallel, cross-validates each, and recommends the best one automatically.</p>
+
+                    <div class="glass-card p-6 rounded-xl mb-6">
+                        <h3 class="text-lg font-semibold mb-3">Target Column Selection</h3>
+                        <p class="text-sm text-gray-400 mb-3">${suggested}</p>
+                        <div class="flex flex-col md:flex-row md:items-center gap-4">
+                            <select id="predictTarget" class="bg-white/5 border border-white/10 rounded-xl px-4 py-3 flex-1">
+                                <option value="">Auto-detect target</option>
+                                ${options}
+                            </select>
+                            <button onclick="runPredictive()" class="gradient-button px-8 py-3 rounded-xl font-semibold flex items-center gap-2">
+                                <span>⚡</span> Run AutoML
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="predictiveResults" class="space-y-6">
+                        <div class="glass-card p-6 rounded-xl text-center text-gray-400 py-12">
+                            Select a target column (or use Auto-detect) and click <strong>Run AutoML</strong>.
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Predictive load error:', error);
+                document.getElementById('tabContent').innerHTML = `
+                    <div class="text-center py-12">
+                        <p class="text-red-400 text-lg mb-2">Failed to load predictive analysis</p>
+                        <p class="text-gray-400 text-sm">${error.message}</p>
+                    </div>`;
+            }
+        }
+
+        async function runPredictive() {
+            if (!currentDatasetId) { alert('Please select a dataset first'); return; }
+
+            const target = document.getElementById('predictTarget').value;
+            const resultsDiv = document.getElementById('predictiveResults');
+            resultsDiv.innerHTML = `
+                <div class="glass-card p-8 rounded-xl text-center">
+                    <div class="flex justify-center mb-4"><div class="loader"></div></div>
+                    <p class="text-gray-300 font-semibold">AutoML Tournament in progress…</p>
+                    <p class="text-gray-500 text-sm mt-1">Training &amp; cross-validating multiple models. This may take 20–60 seconds.</p>
+                </div>`;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/predictive`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dataset_id: currentDatasetId, target_column: target || null })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.detail || data.message || `HTTP ${response.status}`);
+
+                const isRegression = data.task === 'regression';
+                const bm = data.best_metrics || {};
+                const comparison = data.model_comparison || [];
+                const warnings = data.warnings || [];
+
+                // ── Header ─────────────────────────────────────────────────────
+                let html = `
+                    <div class="glass-card p-6 rounded-xl">
+                        <div class="flex flex-wrap items-start justify-between gap-4 mb-4">
+                            <div>
+                                <h3 class="text-2xl font-bold gradient-text">${isRegression ? '📈 Regression' : '🏆 Classification'} Results</h3>
+                                <p class="text-gray-400 text-sm mt-1">Target: <span class="text-gray-200 font-semibold">${data.target_column}</span>
+                                    &nbsp;|&nbsp; Best model: <span class="text-yellow-300 font-semibold">${data.best_model}</span>
+                                    &nbsp;|&nbsp; Train: ${data.train_size.toLocaleString()} / Test: ${data.test_size.toLocaleString()} rows
+                                </p>
+                            </div>
+                            ${!isRegression ? `<div class="text-xs text-gray-500">${data.num_classes} classes</div>` : ''}
+                        </div>`;
+
+                // ── Metric badges ───────────────────────────────────────────────
+                if (isRegression) {
+                    html += `
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">R² Score</div><div class="text-2xl font-bold text-green-400">${bm.r2 ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">RMSE</div><div class="text-2xl font-bold">${bm.rmse ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">MAE</div><div class="text-2xl font-bold">${bm.mae ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">CV R² Stability</div><div class="text-2xl font-bold text-purple-400">${bm.stability ?? '—'}%</div></div>
+                        </div>`;
+                } else {
+                    html += `
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">Test Accuracy</div><div class="text-2xl font-bold text-green-400">${bm.accuracy ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">F1 Macro</div><div class="text-2xl font-bold">${bm.f1_macro ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">CV F1 (mean)</div><div class="text-2xl font-bold text-purple-400">${bm.cv_f1_mean ?? '—'}</div></div>
+                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">Stability Score</div><div class="text-2xl font-bold text-yellow-400">${bm.stability ?? '—'}%</div></div>
+                        </div>`;
+                }
+                html += `</div>`;
+
+                // ── Warnings ────────────────────────────────────────────────────
+                if (warnings.length) {
+                    html += `<div class="glass-card p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/30">
+                        <div class="text-yellow-300 font-semibold mb-1">⚠️ Notices</div>
+                        <ul class="text-sm text-yellow-200 space-y-1">${warnings.map(w => `<li>• ${w}</li>`).join('')}</ul>
+                    </div>`;
+                }
+
+                // ── AutoML Comparison Chart ─────────────────────────────────────
+                if (data.model_comparison_chart && data.model_comparison_chart.data) {
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h4 class="text-lg font-semibold mb-4">⚡ AutoML Tournament — All Models</h4>
+                        <div id="modelCompChart"></div>
+                    </div>`;
+                }
+
+                // ── Model Comparison Table ──────────────────────────────────────
+                if (comparison.length) {
+                    const scoreKey = isRegression ? 'r2' : 'accuracy';
+                    const cvKey = isRegression ? 'cv_r2_mean' : 'cv_f1_mean';
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h4 class="text-lg font-semibold mb-4">📋 Model Leaderboard</h4>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead><tr class="border-b border-white/10 text-gray-400">
+                                    <th class="text-left py-2 px-3">Model</th>
+                                    <th class="text-left py-2 px-3">${isRegression ? 'R²' : 'Accuracy'}</th>
+                                    <th class="text-left py-2 px-3">${isRegression ? 'RMSE' : 'F1 Macro'}</th>
+                                    <th class="text-left py-2 px-3">CV Score</th>
+                                    <th class="text-left py-2 px-3">Stability</th>
+                                    <th class="text-left py-2 px-3"></th>
+                                </tr></thead>
+                                <tbody>
+                                    ${comparison.map(r => `
+                                        <tr class="border-b border-white/5 ${r.is_best ? 'bg-yellow-500/10' : 'hover:bg-white/5'}">
+                                            <td class="py-2 px-3 font-semibold">${r.model}</td>
+                                            <td class="py-2 px-3">${r[scoreKey] ?? '<span class="text-red-400">failed</span>'}</td>
+                                            <td class="py-2 px-3">${isRegression ? (r.rmse ?? '—') : (r.f1_macro ?? '—')}</td>
+                                            <td class="py-2 px-3">${r[cvKey] ?? '—'}</td>
+                                            <td class="py-2 px-3">${r.stability != null ? r.stability + '%' : '—'}</td>
+                                            <td class="py-2 px-3">${r.is_best ? '<span class="text-yellow-400 font-bold">👑 Best</span>' : ''}</td>
+                                        </tr>`).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>`;
+                }
+
+                // ── Feature Importance Chart ────────────────────────────────────
+                if (data.feature_importance_chart && data.feature_importance_chart.data) {
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h4 class="text-lg font-semibold mb-4">🔬 Feature Importances — ${data.best_model}</h4>
+                        <div id="featureImpChart"></div>
+                    </div>`;
+                }
+
+                // ── Confusion Matrix ────────────────────────────────────────────
+                const conf = data.confusion_matrix || [];
+                const classes = data.classes || [];
+                if (!isRegression && conf.length && classes.length) {
+                    html += `<div class="glass-card p-6 rounded-xl">
+                        <h4 class="text-lg font-semibold mb-4">🧮 Confusion Matrix (Best Model)</h4>
+                        <div class="overflow-x-auto">
+                            <table class="text-sm">
+                                <thead><tr><th class="py-2 px-3 text-left">Actual \\ Predicted</th>${classes.map(c=>`<th class="py-2 px-3">${c}</th>`).join('')}</tr></thead>
+                                <tbody>${conf.map((row, i) => `<tr class="border-b border-white/5"><td class="py-2 px-3 font-semibold">${classes[i]}</td>${row.map((v,j) => `<td class="py-2 px-3 ${i===j?'bg-green-500/20 font-bold':''}">${v}</td>`).join('')}</tr>`).join('')}</tbody>
+                            </table>
+                        </div>
+                    </div>`;
+                }
+
+                resultsDiv.innerHTML = html;
+
+                // Render Plotly charts after DOM update
+                setTimeout(() => {
+                    if (data.model_comparison_chart && data.model_comparison_chart.data) {
+                        try { Plotly.newPlot('modelCompChart', data.model_comparison_chart.data, data.model_comparison_chart.layout || {}); } catch(e){}
+                    }
+                    if (data.feature_importance_chart && data.feature_importance_chart.data) {
+                        try { Plotly.newPlot('featureImpChart', data.feature_importance_chart.data, data.feature_importance_chart.layout || {}); } catch(e){}
+                    }
+                }, 200);
+
+            } catch (error) {
+                console.error('Predictive error:', error);
+                resultsDiv.innerHTML = `<div class="glass-card p-6 rounded-xl text-center text-red-400 py-8">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function loadImageAnalysis() {
+            const content = document.getElementById('tabContent');
+            try {
+                const augResp = await fetch(`${API_BASE}/api/augmentation/${currentDatasetId}`);
+                if (!augResp.ok) throw new Error(`HTTP ${augResp.status}`);
+                const aug = await augResp.json();
+                const stats = aug.stats || {};
+                const suggestions = aug.suggestions || [];
+                const priorityColor = { 'High': 'text-red-400', 'Medium': 'text-yellow-400', 'Low': 'text-green-400' };
+                const classDist = stats.class_distribution || {};
+                const classBars = Object.entries(classDist).slice(0, 20).map(([cls, cnt]) => `
+                    <div class="flex items-center gap-3 py-1">
+                        <div class="w-28 text-sm truncate text-gray-300" title="${cls}">${cls}</div>
+                        <div class="flex-1 bg-white/5 rounded h-4 overflow-hidden">
+                            <div class="h-full bg-gradient-to-r from-purple-500 to-pink-500"
+                                style="width:${Math.round(cnt/Math.max(...Object.values(classDist))*100)}%"></div>
+                        </div>
+                        <div class="text-xs text-gray-400 w-10 text-right">${cnt}</div>
+                    </div>`).join('');
+
+                content.innerHTML = `
+                    <h2 class="text-3xl font-bold mb-2 gradient-text">🖼️ Image Dataset Analysis</h2>
+                    <p class="text-gray-400 mb-6 text-sm">${aug.filename}</p>
+
+                    <!-- Stats grid -->
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                        <div class="glass-card p-5 rounded-xl text-center">
+                            <div class="text-xs text-gray-400 mb-1">Total Images</div>
+                            <div class="text-2xl font-bold text-purple-400">${stats.total_images?.toLocaleString() ?? 0}</div>
+                        </div>
+                        <div class="glass-card p-5 rounded-xl text-center">
+                            <div class="text-xs text-gray-400 mb-1">Classes</div>
+                            <div class="text-2xl font-bold text-pink-400">${stats.num_classes ?? 0}</div>
+                        </div>
+                        <div class="glass-card p-5 rounded-xl text-center">
+                            <div class="text-xs text-gray-400 mb-1">Avg Size</div>
+                            <div class="text-2xl font-bold">${stats.avg_width ?? 0} × ${stats.avg_height ?? 0}</div>
+                        </div>
+                        <div class="glass-card p-5 rounded-xl text-center">
+                            <div class="text-xs text-gray-400 mb-1">Imbalance Ratio</div>
+                            <div class="text-2xl font-bold ${stats.class_imbalance_ratio > 3 ? 'text-red-400' : 'text-green-400'}">${stats.class_imbalance_ratio ?? 1}×</div>
+                        </div>
+                    </div>
+
+                    <!-- Class distribution -->
+                    ${classBars ? `
+                    <div class="glass-card p-6 rounded-xl mb-6">
+                        <h3 class="text-lg font-semibold mb-4">📊 Class Distribution</h3>
+                        <div class="space-y-1">${classBars}</div>
+                        ${Object.keys(classDist).length > 20 ? `<p class="text-xs text-gray-500 mt-2">Showing top 20 of ${Object.keys(classDist).length} classes.</p>` : ''}
+                    </div>` : ''}
+
+                    <!-- AI Commentary -->
+                    ${aug.ai_commentary ? `
+                    <div class="glass-card p-6 rounded-xl mb-6 bg-purple-500/10 border border-purple-500/30">
+                        <div class="flex items-start gap-3">
+                            <span class="text-2xl">🧠</span>
+                            <div>
+                                <h4 class="font-semibold text-purple-300 mb-2">AI Augmentation Strategy</h4>
+                                <p class="text-sm text-gray-300 leading-relaxed">${aug.ai_commentary}</p>
+                            </div>
+                        </div>
+                    </div>` : ''}
+
+                    <!-- Augmentation suggestions table -->
+                    <div class="glass-card p-6 rounded-xl">
+                        <h3 class="text-lg font-semibold mb-4">🔧 Recommended Augmentation Techniques</h3>
+                        <div class="space-y-3">
+                            ${suggestions.map(s => `
+                                <div class="bg-white/5 rounded-xl p-4 border border-white/10">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="font-semibold text-white">${s.technique}</span>
+                                        <span class="text-xs font-bold ${priorityColor[s.priority] || 'text-gray-400'}">${s.priority} Priority</span>
+                                    </div>
+                                    <p class="text-sm text-gray-400 mb-2">${s.reason}</p>
+                                    <code class="text-xs bg-black/30 px-2 py-1 rounded text-green-400">${s.code_hint}</code>
+                                </div>`).join('')}
+                        </div>
+                    </div>`;
+            } catch (error) {
+                content.innerHTML = `<div class="text-center py-12 text-red-400">Failed to load image analysis: ${error.message}</div>`;
             }
         }
 

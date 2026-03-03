@@ -15,6 +15,22 @@ from datetime import datetime
 import uuid
 import logging
 
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (accuracy_score, f1_score, confusion_matrix, classification_report,
+                              mean_squared_error, r2_score, mean_absolute_error)
+from sklearn.linear_model import LogisticRegression, Ridge, LinearRegression
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                               ExtraTreesClassifier, RandomForestRegressor,
+                               GradientBoostingRegressor, ExtraTreesRegressor)
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.neighbors import KNeighborsClassifier
+import zipfile
+from PIL import Image
+
 # Import your existing modules
 from clean_and_EDA_generate import enhanced_eda_json, clean_data, read_and_validate_file
 from generate_report import generate_eda_report_ppt
@@ -38,6 +54,11 @@ app.add_middleware(
 datasets = {}
 eda_results = {}
 
+MAX_EDA_SAMPLE_ROWS = 100000
+MAX_PRED_SAMPLE_ROWS = 200000
+MAX_VIZ_COLUMNS = 30
+MAX_PRED_FEATURES = 80
+
 class QueryRequest(BaseModel):
     dataset_id: str
     query: str
@@ -56,6 +77,10 @@ class ExploreRequest(BaseModel):
     sort_order: Optional[str] = "asc"
     page: Optional[int] = 1
     page_size: Optional[int] = 50
+
+class PredictRequest(BaseModel):
+    dataset_id: str
+    target_column: Optional[str] = None
 
 def detect_primary_keys(df: pd.DataFrame) -> List[str]:
     """
@@ -115,6 +140,196 @@ def detect_primary_keys(df: pd.DataFrame) -> List[str]:
         logger.info("No primary keys detected in dataset")
     
     return primary_keys
+
+def sample_dataframe(df: pd.DataFrame, max_rows: int, random_state: int = 42) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if len(df) <= max_rows:
+        return df
+    return df.sample(n=max_rows, random_state=random_state)
+
+def downsample_ordered(df: pd.DataFrame, max_rows: int) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if len(df) <= max_rows:
+        return df
+    step = max(1, len(df) // max_rows)
+    return df.iloc[::step].copy()
+
+def compute_column_groups(df: pd.DataFrame, primary_keys: List[str]) -> Dict[str, List[str]]:
+    groups = {
+        "identifiers": [],
+        "datetime": [],
+        "numeric": [],
+        "categorical": [],
+        "text": []
+    }
+    if df is None or df.empty:
+        return groups
+
+    for col in df.columns:
+        if col in primary_keys:
+            groups["identifiers"].append(col)
+            continue
+
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            groups["datetime"].append(col)
+            continue
+
+        if is_numeric_column(df, col):
+            groups["numeric"].append(col)
+            continue
+
+        if is_categorical_column(df, col, primary_keys):
+            groups["categorical"].append(col)
+        else:
+            sample = df[col].dropna().astype(str).head(100)
+            avg_len = sample.map(len).mean() if len(sample) > 0 else 0
+            if avg_len >= 20:
+                groups["text"].append(col)
+            else:
+                groups["categorical"].append(col)
+
+    return groups
+
+def select_visual_columns(df: pd.DataFrame, primary_keys: List[str], max_columns: int) -> Dict[str, List[str]]:
+    numeric_scores = []
+    categorical_scores = []
+
+    for col in df.columns:
+        if col in primary_keys:
+            continue
+
+        missing_ratio = df[col].isna().mean()
+
+        if is_numeric_column(df, col):
+            series = pd.to_numeric(df[col], errors='coerce')
+            if series.notna().sum() < 3:
+                continue
+            variance = float(series.var(skipna=True)) if series.notna().sum() > 1 else 0.0
+            score = variance * (1.0 - missing_ratio)
+            numeric_scores.append((col, score))
+        elif is_categorical_column(df, col, primary_keys):
+            unique_count = df[col].nunique(dropna=True)
+            if unique_count < 2:
+                continue
+            penalty = math.log(unique_count + 1)
+            score = (1.0 - missing_ratio) / max(1.0, penalty)
+            categorical_scores.append((col, score))
+
+    numeric_scores.sort(key=lambda x: x[1], reverse=True)
+    categorical_scores.sort(key=lambda x: x[1], reverse=True)
+
+    return {
+        "numeric": [c for c, _ in numeric_scores[:max_columns]],
+        "categorical": [c for c, _ in categorical_scores[:max_columns]]
+    }
+
+def detect_candidate_targets(df: pd.DataFrame, primary_keys: List[str]) -> List[str]:
+    candidates = []
+    for col in df.columns:
+        if col in primary_keys:
+            continue
+        if is_categorical_column(df, col, primary_keys):
+            unique_count = df[col].nunique(dropna=True)
+            if 2 <= unique_count <= 20:
+                candidates.append(col)
+    return candidates
+
+def summarize_imbalance(series: pd.Series) -> Dict[str, Any]:
+    counts = series.value_counts(dropna=True)
+    total = int(counts.sum())
+    if total == 0:
+        return {"total": 0, "imbalance_ratio": None, "majority_share": None, "minority_share": None}
+    majority = float(counts.max() / total)
+    minority = float(counts.min() / total) if len(counts) > 1 else 0.0
+    imbalance_ratio = float(counts.max() / max(1, counts.min())) if len(counts) > 1 else float('inf')
+    return {
+        "total": total,
+        "classes": {str(k): int(v) for k, v in counts.head(10).to_dict().items()},
+        "imbalance_ratio": round(imbalance_ratio, 3),
+        "majority_share": round(majority, 3),
+        "minority_share": round(minority, 3)
+    }
+
+def build_profile_summary(df: pd.DataFrame, df_sample: pd.DataFrame, eda: dict, primary_keys: List[str]) -> Dict[str, Any]:
+    columns = eda.get("columns", {}) if eda else {}
+    missing_rank = []
+    for col, info in columns.items():
+        missing_rank.append((col, info.get("missing_percent", 0)))
+    missing_rank.sort(key=lambda x: x[1], reverse=True)
+
+    column_groups = compute_column_groups(df_sample, primary_keys)
+    candidates = detect_candidate_targets(df_sample, primary_keys)
+
+    imbalance = {}
+    for col in candidates[:5]:
+        imbalance[col] = summarize_imbalance(df_sample[col].dropna())
+
+    return {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "sampled_rows": len(df_sample),
+        "sample_ratio": round(len(df_sample) / max(1, len(df)), 4),
+        "primary_keys": primary_keys,
+        "top_missing_columns": [
+            {"column": c, "missing_percent": round(p, 2)}
+            for c, p in missing_rank[:8]
+        ],
+        "column_groups": {k: v[:30] for k, v in column_groups.items()},
+        "candidate_targets": candidates[:10],
+        "imbalance_hints": imbalance
+    }
+
+def auto_select_target(df: pd.DataFrame, primary_keys: List[str]) -> Optional[str]:
+    candidates = detect_candidate_targets(df, primary_keys)
+    if not candidates:
+        return None
+    scored = []
+    for col in candidates:
+        series = df[col].dropna()
+        if series.empty:
+            continue
+        imbalance = summarize_imbalance(series)
+        majority = imbalance.get("majority_share", 1.0)
+        unique_count = series.nunique()
+        score = (1.0 - majority) + (unique_count / 20.0)
+        scored.append((col, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[0][0] if scored else candidates[0]
+
+def select_prediction_features(df: pd.DataFrame, target_col: str, primary_keys: List[str]) -> List[str]:
+    numeric_scores = []
+    categorical_scores = []
+
+    for col in df.columns:
+        if col == target_col or col in primary_keys:
+            continue
+        missing_ratio = df[col].isna().mean()
+
+        if is_numeric_column(df, col):
+            series = pd.to_numeric(df[col], errors='coerce')
+            if series.notna().sum() < 10:
+                continue
+            variance = float(series.var(skipna=True)) if series.notna().sum() > 1 else 0.0
+            score = variance * (1.0 - missing_ratio)
+            numeric_scores.append((col, score))
+        elif is_categorical_column(df, col, primary_keys):
+            unique_count = df[col].nunique(dropna=True)
+            if unique_count < 2 or unique_count > 200:
+                continue
+            penalty = math.log(unique_count + 1)
+            score = (1.0 - missing_ratio) / max(1.0, penalty)
+            categorical_scores.append((col, score))
+
+    numeric_scores.sort(key=lambda x: x[1], reverse=True)
+    categorical_scores.sort(key=lambda x: x[1], reverse=True)
+
+    numeric_selected = [c for c, _ in numeric_scores[:MAX_PRED_FEATURES // 2]]
+    categorical_selected = [c for c, _ in categorical_scores[:MAX_PRED_FEATURES // 2]]
+
+    selected = numeric_selected + categorical_selected
+    return selected[:MAX_PRED_FEATURES]
 
 def detect_entity_id(df: pd.DataFrame) -> Optional[str]:
     """Detect identifier column for deduplication (returns first primary key)"""
@@ -514,10 +729,14 @@ async def upload_dataset(file: UploadFile = File(...)):
         
         logger.info(f"After cleaning: {len(df)} rows, {len(df.columns)} cols")
         
+        # Sample for faster EDA and visualizations
+        df_sample = sample_dataframe(df, MAX_EDA_SAMPLE_ROWS)
+        is_sampled = len(df_sample) < len(df)
+
         # Generate EDA
         logger.info(f"Generating EDA for: {file.filename}")
         try:
-            eda = enhanced_eda_json(df)
+            eda = enhanced_eda_json(df_sample)
         except Exception as eda_error:
             logger.error(f"Error generating EDA: {str(eda_error)}", exc_info=True)
             raise HTTPException(500, f"EDA generation failed: {str(eda_error)}")
@@ -539,13 +758,24 @@ async def upload_dataset(file: UploadFile = File(...)):
         
         # Detect primary keys
         primary_keys = detect_primary_keys(df)
+
+        # Enrich EDA with sampling metadata
+        eda["sampled_rows"] = len(df_sample)
+        eda["sample_ratio"] = round(len(df_sample) / max(1, len(df)), 4)
+
+        # Build profile summary
+        profile = build_profile_summary(df, df_sample, eda, primary_keys)
         
         # Store in memory
         datasets[dataset_id] = {
             "df": df,
+            "df_sample": df_sample,
             "filename": file.filename,
             "uploaded_at": datetime.now().isoformat(),
-            "primary_keys": primary_keys
+            "primary_keys": primary_keys,
+            "is_sampled": is_sampled,
+            "profile": profile,
+            "analysis_cache": {}
         }
         eda_results[dataset_id] = eda
         
@@ -559,7 +789,9 @@ async def upload_dataset(file: UploadFile = File(...)):
             "rows": len(df),
             "columns": len(df.columns),
             "primary_keys": primary_keys,
-            "eda": eda
+            "eda": eda,
+            "profile": profile,
+            "is_sampled": is_sampled
         }
         
         # Final check: ensure response is JSON-serializable
@@ -630,6 +862,8 @@ async def get_dataset_info(dataset_id: str):
         "rows": len(df),
         "columns": len(df.columns),
         "primary_keys": primary_keys,
+        "profile": datasets[dataset_id].get("profile"),
+        "is_sampled": datasets[dataset_id].get("is_sampled", False),
         "eda": enhanced_eda,
         "preview": df.head(10).fillna("").to_dict('records')
     }
@@ -639,13 +873,17 @@ async def get_numerical_analysis(dataset_id: str):
     """Get numerical analysis with robust statistics, outlier computation, information-rich Plotly charts"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "numerical" in cache:
+        return cache["numerical"]
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
         eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # First, get all numeric columns
-        all_numeric_cols = [col for col in df.columns if is_numeric_column(df, col)]
+        all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
         logger.info(f"Numerical: {len(all_numeric_cols)} numeric columns found: {all_numeric_cols}")
         
         # Filter out non-sensible numeric columns (IDs, mobile numbers, etc.)
@@ -653,7 +891,7 @@ async def get_numerical_analysis(dataset_id: str):
         skipped_cols = []
         
         for col in all_numeric_cols:
-            if is_sensible_numeric_column(df, col, eda, primary_keys):
+            if is_sensible_numeric_column(df_visual, col, eda, primary_keys):
                 sensible_numeric_cols.append(col)
             else:
                 skipped_cols.append(col)
@@ -677,11 +915,14 @@ async def get_numerical_analysis(dataset_id: str):
                 "message": message
             }
         
+        selected = select_visual_columns(df_visual, primary_keys, MAX_VIZ_COLUMNS)
+        selected_numeric = [c for c in sensible_numeric_cols if c in selected["numeric"]]
+
         visualizations = []
         statistics = {}
-        for col in sensible_numeric_cols[:10]:  # Limit to 10 columns
+        for col in selected_numeric[:MAX_VIZ_COLUMNS]:
             try:
-                series = get_clean_series(df, col)
+                series = get_clean_series(df_visual, col)
                 series_numeric = pd.to_numeric(series, errors='coerce')
                 series_numeric_clean = series_numeric.dropna()
                 if len(series_numeric_clean) == 0:
@@ -804,15 +1045,18 @@ async def get_numerical_analysis(dataset_id: str):
             except Exception as e:
                 logger.warning(f"Numerical analysis skipped column {col}: {str(e)}")
         
-        return {
+        result = {
             "type": "numerical", 
             "columns": sensible_numeric_cols, 
             "count": len(sensible_numeric_cols), 
             "visualizations": visualizations, 
             "statistics": statistics,
             "skipped_columns": skipped_cols if skipped_cols else None,
-            "total_numeric_columns": len(all_numeric_cols)
+            "total_numeric_columns": len(all_numeric_cols),
+            "selected_columns": selected_numeric
         }
+        cache["numerical"] = result
+        return result
     except Exception as e:
         logger.error(f"Numerical analysis error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Error generating numerical analysis: {str(e)}")
@@ -822,22 +1066,26 @@ async def get_categorical_analysis(dataset_id: str):
     """Get categorical analysis with visualizations"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "categorical" in cache:
+        return cache["categorical"]
     
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # Get all potential categorical columns and track skipped identifiers
         all_potential_categorical = []
         skipped_identifiers = []
         
-        for col in df.columns:
-            unique_count = df[col].nunique()
-            total_count = len(df)
+        for col in df_visual.columns:
+            unique_count = df_visual[col].nunique()
+            total_count = len(df_visual)
             unique_ratio = unique_count / total_count if total_count > 0 else 0
             
             # Check if it's categorical (this function now filters out high-uniqueness columns and primary keys)
-            if is_categorical_column(df, col, primary_keys):
+            if is_categorical_column(df_visual, col, primary_keys):
                 all_potential_categorical.append(col)
             elif col in primary_keys or unique_ratio > 0.95:
                 # Track skipped identifier columns
@@ -869,11 +1117,14 @@ async def get_categorical_analysis(dataset_id: str):
                 "message": message
             }
         
+        selected = select_visual_columns(df_visual, primary_keys, MAX_VIZ_COLUMNS)
+        selected_categorical = [c for c in categorical_cols if c in selected["categorical"]]
+
         visualizations = []
         
-        for col in categorical_cols[:10]:
+        for col in selected_categorical[:MAX_VIZ_COLUMNS]:
             try:
-                series = get_clean_series(df, col)
+                series = get_clean_series(df_visual, col)
                 
                 # Count missing
                 missing_count = int(series.isna().sum() + series.astype(str).str.strip().eq("").sum())
@@ -958,13 +1209,16 @@ async def get_categorical_analysis(dataset_id: str):
                 logger.error(f"Error processing column {col}: {str(col_error)}", exc_info=True)
                 continue
         
-        return {
+        result = {
             "type": "categorical",
             "columns": categorical_cols,
             "count": len(categorical_cols),
             "visualizations": visualizations,
-            "skipped_identifiers": skipped_identifiers if skipped_identifiers else None
+            "skipped_identifiers": skipped_identifiers if skipped_identifiers else None,
+            "selected_columns": selected_categorical
         }
+        cache["categorical"] = result
+        return result
     
     except Exception as e:
         logger.error(f"Categorical analysis error: {str(e)}", exc_info=True)
@@ -975,18 +1229,22 @@ async def get_correlation_analysis(dataset_id: str):
     """Get correlation analysis with heatmap. Handles NaNs and zero-variance columns. Only shows strong/high correlations."""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "correlations" in cache:
+        return cache["correlations"]
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
         eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # Get all numeric columns and filter out non-sensible ones
-        all_numeric_cols = [col for col in df.columns if is_numeric_column(df, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df, col, eda, primary_keys)]
+        all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
+        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
         logger.info(f"Correlation: {len(numeric_cols)} sensible numeric columns found (out of {len(all_numeric_cols)} total): {numeric_cols}")
         if len(numeric_cols) < 2:
             return {"type": "correlations", "error": "Not enough numeric columns (at least 2 required)", "numeric_columns_found": len(numeric_cols), "columns": numeric_cols, "strong_correlations": [], "visualizations": []}
-        numeric_df = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+        numeric_df = df_visual[numeric_cols].apply(pd.to_numeric, errors='coerce')
         # Drop constant and mostly NaN columns
         usable_cols = [col for col in numeric_cols if numeric_df[col].nunique(dropna=True) > 1 and numeric_df[col].notna().sum() > 2]
         numeric_df = numeric_df[usable_cols]
@@ -1035,7 +1293,9 @@ async def get_correlation_analysis(dataset_id: str):
                     strong_corr.append({"col1": corr_matrix.columns[i], "col2": corr_matrix.columns[j], "correlation": round(float(corr_val), 3), "strength": "Strong Positive" if corr_val > 0 else "Strong Negative"})
         strong_corr.sort(key=lambda x: abs(x["correlation"]), reverse=True)
         logger.info(f"Correlation: {len(strong_corr)} strong pairs")
-        return {"type": "correlations", "columns": corr_matrix.columns.tolist(), "strong_correlations": strong_corr, "visualizations": [{"type": "heatmap", "figure": convert_plotly_figure_to_dict(fig)}]}
+        result = {"type": "correlations", "columns": corr_matrix.columns.tolist(), "strong_correlations": strong_corr, "visualizations": [{"type": "heatmap", "figure": convert_plotly_figure_to_dict(fig)}]}
+        cache["correlations"] = result
+        return result
     except Exception as e:
         logger.error(f"Correlation analysis error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Error generating correlation analysis: {str(e)}")
@@ -1045,14 +1305,18 @@ async def get_outliers_analysis(dataset_id: str):
     """Get comprehensive outliers analysis with IQR, Z-score, and visualization"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "outliers" in cache:
+        return cache["outliers"]
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
         eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # Get all numeric columns and filter out non-sensible ones (including primary keys)
-        all_numeric_cols = [col for col in df.columns if is_numeric_column(df, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df, col, eda, primary_keys)]
+        all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
+        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
         logger.info(f"Outliers: {len(numeric_cols)} sensible numeric columns found (out of {len(all_numeric_cols)} total): {numeric_cols}")
         
         if not numeric_cols:
@@ -1071,7 +1335,7 @@ async def get_outliers_analysis(dataset_id: str):
         
         for col in numeric_cols[:10]:
             try:
-                series = get_clean_series(df, col)
+                series = get_clean_series(df_visual, col)
                 series_numeric = pd.to_numeric(series, errors='coerce')
                 series_numeric_clean = series_numeric.dropna()
                 
@@ -1154,7 +1418,7 @@ async def get_outliers_analysis(dataset_id: str):
                 logger.warning(f"Outlier analysis skipped column {col}: {str(e)}")
                 continue
         
-        return {
+        result = {
             "type": "outliers",
             "columns": numeric_cols,
             "count": len(numeric_cols),
@@ -1162,6 +1426,8 @@ async def get_outliers_analysis(dataset_id: str):
             "statistics": statistics,
             "outlier_details": outlier_details
         }
+        cache["outliers"] = result
+        return result
     
     except Exception as e:
         logger.error(f"Outliers analysis error: {str(e)}", exc_info=True)
@@ -1172,30 +1438,34 @@ async def get_timeseries_analysis(dataset_id: str):
     """Get time series analysis with trend detection, seasonality, and forecasting"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "timeseries" in cache:
+        return cache["timeseries"]
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = downsample_ordered(df, MAX_EDA_SAMPLE_ROWS)
         
         # Try to detect date/time columns - be strict: only accept actual datetime columns
         date_cols = []
-        for col in df.columns:
+        for col in df_visual.columns:
             # Skip if column is already numeric (not a date)
-            if pd.api.types.is_numeric_dtype(df[col]):
+            if pd.api.types.is_numeric_dtype(df_visual[col]):
                 continue
             
             # Try strict datetime conversion
             try:
                 # Attempt to convert entire column to datetime
-                test_series = pd.to_datetime(df[col], errors='raise', format='mixed')
+                test_series = pd.to_datetime(df_visual[col], errors='raise', format='mixed')
                 
                 # Check if conversion was successful and has valid datetime values
                 valid_count = test_series.notna().sum()
-                if valid_count > len(df) * 0.8:  # At least 80% valid datetime values
+                if valid_count > len(df_visual) * 0.8:  # At least 80% valid datetime values
                     # Check if it's actually a datetime type or datetime64
                     if pd.api.types.is_datetime64_any_dtype(test_series) or isinstance(test_series.dtype, pd.DatetimeTZDtype):
                         date_cols.append(col)
                         logger.info(f"Detected datetime column: {col}")
                     # Also check if the values are actually dates (not just strings that look like dates)
-                    elif valid_count == len(df):
+                    elif valid_count == len(df_visual):
                         # Double check by verifying it's not just sequential numbers
                         try:
                             # If we can convert to datetime without errors, it's likely a date column
@@ -1217,11 +1487,11 @@ async def get_timeseries_analysis(dataset_id: str):
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # Get all numeric columns and filter out non-sensible ones (including primary keys)
-        all_numeric_cols = [col for col in df.columns if is_numeric_column(df, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df, col, eda, primary_keys)]
+        all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
+        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
         
         if not date_cols:
-            return {
+            result = {
                 "type": "timeseries",
                 "error": "No time series detected. Dataset does not contain a valid date/time column or timestamp.",
                 "date_columns_found": 0,
@@ -1229,9 +1499,11 @@ async def get_timeseries_analysis(dataset_id: str):
                 "visualizations": [],
                 "message": "No time series detected"
             }
+            cache["timeseries"] = result
+            return result
         
         if not numeric_cols:
-            return {
+            result = {
                 "type": "timeseries",
                 "error": "No numeric columns found for time series analysis",
                 "date_columns_found": len(date_cols),
@@ -1239,6 +1511,8 @@ async def get_timeseries_analysis(dataset_id: str):
                 "visualizations": [],
                 "message": "No time series detected"
             }
+            cache["timeseries"] = result
+            return result
         
         visualizations = []
         analyses = {}
@@ -1249,7 +1523,7 @@ async def get_timeseries_analysis(dataset_id: str):
             for num_col in numeric_cols[:5]:  # Limit to 5 numeric columns
                 try:
                     # Prepare time series data
-                    ts_df = df[[date_col, num_col]].copy()
+                    ts_df = df_visual[[date_col, num_col]].copy()
                     ts_df[date_col] = pd.to_datetime(ts_df[date_col], errors='coerce')
                     ts_df[num_col] = pd.to_numeric(ts_df[num_col], errors='coerce')
                     ts_df = ts_df.dropna()
@@ -1328,7 +1602,7 @@ async def get_timeseries_analysis(dataset_id: str):
         
         # If no valid time series combinations found
         if valid_combinations == 0 or len(visualizations) == 0:
-            return {
+            result = {
                 "type": "timeseries",
                 "error": "No time series detected. Dataset does not contain valid sequential date/time data.",
                 "date_columns_found": len(date_cols),
@@ -1336,14 +1610,18 @@ async def get_timeseries_analysis(dataset_id: str):
                 "visualizations": [],
                 "message": "No time series detected"
             }
+            cache["timeseries"] = result
+            return result
         
-        return {
+        result = {
             "type": "timeseries",
             "date_columns": date_cols,
             "numeric_columns": numeric_cols,
             "visualizations": visualizations,
             "analyses": analyses
         }
+        cache["timeseries"] = result
+        return result
     
     except Exception as e:
         logger.error(f"Time series analysis error: {str(e)}", exc_info=True)
@@ -1354,22 +1632,28 @@ async def get_contour_analysis(dataset_id: str):
     """Get contour box plots for numeric column pairs"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "contour" in cache:
+        return cache["contour"]
     try:
         df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
         eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
         
         # Get all numeric columns and filter out non-sensible ones (including primary keys)
-        all_numeric_cols = [col for col in df.columns if is_numeric_column(df, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df, col, eda, primary_keys)]
+        all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
+        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
         
         if len(numeric_cols) < 2:
-            return {
+            result = {
                 "type": "contour",
                 "error": "Need at least 2 numeric columns for contour plots",
                 "numeric_columns_found": len(numeric_cols),
                 "visualizations": []
             }
+            cache["contour"] = result
+            return result
         
         visualizations = []
         
@@ -1377,7 +1661,7 @@ async def get_contour_analysis(dataset_id: str):
         for i, col1 in enumerate(numeric_cols[:5]):
             for col2 in numeric_cols[i+1:6]:  # Limit pairs
                 try:
-                    data_df = df[[col1, col2]].copy()
+                    data_df = df_visual[[col1, col2]].copy()
                     data_df[col1] = pd.to_numeric(data_df[col1], errors='coerce')
                     data_df[col2] = pd.to_numeric(data_df[col2], errors='coerce')
                     data_df = data_df.dropna()
@@ -1433,11 +1717,13 @@ async def get_contour_analysis(dataset_id: str):
                     logger.warning(f"Contour plot skipped {col1} x {col2}: {str(e)}")
                     continue
         
-        return {
+        result = {
             "type": "contour",
             "columns": numeric_cols,
             "visualizations": visualizations
         }
+        cache["contour"] = result
+        return result
     
     except Exception as e:
         logger.error(f"Contour analysis error: {str(e)}", exc_info=True)
@@ -1589,6 +1875,800 @@ Keep each point concise and actionable."""
     except Exception as e:
         logger.error(f"Insights error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Insight generation failed: {str(e)}")
+
+def detect_task_type(series: pd.Series) -> str:
+    """Detect if the target column is regression or classification."""
+    if pd.api.types.is_float_dtype(series):
+        unique_count = series.nunique()
+        if unique_count > 20:
+            return "regression"
+    if pd.api.types.is_integer_dtype(series) or pd.api.types.is_numeric_dtype(series):
+        unique_count = series.nunique()
+        total = len(series)
+        if unique_count > 30 and (unique_count / total) > 0.1:
+            return "regression"
+    return "classification"
+
+
+def compute_data_health_score(df: pd.DataFrame, primary_keys: list) -> dict:
+    """Compute a composite data health score (0-100) for a dataframe."""
+    try:
+        scores = {}
+        total_cells = df.shape[0] * df.shape[1]
+        if total_cells == 0:
+            return {"score": 0, "breakdown": {}}
+
+        # 1. Completeness (no missing values → 100)
+        missing_ratio = df.isna().sum().sum() / total_cells
+        completeness = max(0.0, 1.0 - missing_ratio) * 100
+        scores["completeness"] = round(completeness, 1)
+
+        # 2. Uniqueness (no duplicate rows → 100)
+        dup_ratio = df.duplicated().sum() / max(1, len(df))
+        uniqueness = max(0.0, 1.0 - dup_ratio) * 100
+        scores["uniqueness"] = round(uniqueness, 1)
+
+        # 3. Consistency (numeric skewness penalty)
+        skew_penalties = []
+        for col in df.columns:
+            if col in primary_keys:
+                continue
+            try:
+                if is_numeric_column(df, col):
+                    s = pd.to_numeric(df[col], errors="coerce").dropna()
+                    if len(s) > 5:
+                        sk = abs(float(s.skew()))
+                        # Low skew = good, high skew = penalty
+                        penalty = min(1.0, sk / 10.0)
+                        skew_penalties.append(1.0 - penalty)
+            except Exception:
+                pass
+        consistency = (np.mean(skew_penalties) * 100) if skew_penalties else 100.0
+        scores["consistency"] = round(float(consistency), 1)
+
+        # 4. Validity (columns with >50% missing are penalised)
+        high_missing_cols = sum(1 for col in df.columns if df[col].isna().mean() > 0.5)
+        validity = max(0.0, 1.0 - high_missing_cols / max(1, len(df.columns))) * 100
+        scores["validity"] = round(validity, 1)
+
+        # Overall weighted score
+        overall = (
+            completeness * 0.40 +
+            uniqueness * 0.25 +
+            consistency * 0.20 +
+            validity * 0.15
+        )
+        scores["overall"] = round(overall, 1)
+
+        # Grade
+        if overall >= 90:
+            grade = "Excellent"
+        elif overall >= 75:
+            grade = "Good"
+        elif overall >= 60:
+            grade = "Fair"
+        else:
+            grade = "Poor"
+        scores["grade"] = grade
+
+        return scores
+    except Exception as e:
+        logger.warning(f"Health score computation failed: {e}")
+        return {"score": 0, "breakdown": {}, "grade": "Unknown"}
+
+
+def _build_preprocessor(numeric_features, categorical_features):
+    """Build sklearn ColumnTransformer for mixed feature sets."""
+    transformers = []
+    if numeric_features:
+        transformers.append(("num", Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler())
+        ]), numeric_features))
+    if categorical_features:
+        transformers.append(("cat", Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=True))
+        ]), categorical_features))
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
+def _get_feature_importances(pipeline, feature_names, top_n=25):
+    """Extract feature importances from the best model pipeline."""
+    try:
+        model = pipeline.named_steps["model"]
+        # Tree-based models have feature_importances_
+        if hasattr(model, "feature_importances_"):
+            importance = model.feature_importances_
+        # Linear models have coef_
+        elif hasattr(model, "coef_"):
+            coef = model.coef_
+            importance = np.mean(np.abs(coef), axis=0) if coef.ndim > 1 else np.abs(coef)
+        else:
+            return []
+
+        top_idx = np.argsort(importance)[-top_n:][::-1]
+        results = []
+        for idx in top_idx:
+            if idx < len(feature_names) and float(importance[idx]) > 0:
+                results.append({
+                    "feature": str(feature_names[idx]),
+                    "importance": round(float(importance[idx]), 6)
+                })
+        return results
+    except Exception as e:
+        logger.warning(f"Feature importance extraction failed: {e}")
+        return []
+
+
+@app.post("/api/predictive")
+async def run_predictive_analysis(request: PredictRequest):
+    """AutoML predictive analysis — runs multiple models, compares, and picks the best."""
+    if request.dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+
+    try:
+        df_full = datasets[request.dataset_id]["df"]
+        primary_keys = datasets[request.dataset_id].get("primary_keys", [])
+
+        df_sample = sample_dataframe(df_full, MAX_PRED_SAMPLE_ROWS)
+        target_column = request.target_column or auto_select_target(df_sample, primary_keys)
+
+        if not target_column or target_column not in df_full.columns:
+            raise HTTPException(400, "No suitable target column found. Please specify a target column.")
+
+        data = df_sample.copy().dropna(subset=[target_column])
+        if data.empty:
+            raise HTTPException(400, "No rows remain after dropping missing target values.")
+
+        # ── Detect task type ──────────────────────────────────────────────────────
+        task = detect_task_type(data[target_column])
+
+        selected_features = select_prediction_features(data, target_column, primary_keys)
+        if not selected_features:
+            raise HTTPException(400, "No suitable features found for prediction.")
+
+        data = data[selected_features + [target_column]].copy()
+        X = data[selected_features]
+
+        numeric_features = [c for c in selected_features if is_numeric_column(data, c)]
+        categorical_features = [c for c in selected_features if c not in numeric_features]
+        preprocessor = _build_preprocessor(numeric_features, categorical_features)
+
+        warnings_list = []
+        model_results = []
+        best_pipeline = None
+        best_score = -np.inf
+        best_model_name = ""
+        le = None
+        classes_list = []
+        conf_matrix = []
+        clf_report = {}
+
+        # ── Classification ────────────────────────────────────────────────────────
+        if task == "classification":
+            y = data[target_column].astype(str)
+            le = LabelEncoder()
+            y_enc = le.fit_transform(y)
+            classes_list = le.classes_.tolist()
+            unique_cls = len(classes_list)
+
+            if unique_cls < 2:
+                raise HTTPException(400, "Target column must have at least 2 classes.")
+            if unique_cls > 50:
+                raise HTTPException(400, "Too many classes (>50). Please choose a different target.")
+
+            class_counts = np.bincount(y_enc)
+            can_stratify = class_counts.min() >= 2
+            cv_folds = min(5, class_counts.min()) if can_stratify else 3
+
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X, y_enc, test_size=0.2, random_state=42,
+                stratify=y_enc if can_stratify else None
+            )
+
+            imbalance = summarize_imbalance(y)
+            if imbalance.get("majority_share", 0) >= 0.8:
+                warnings_list.append("Class imbalance detected — consider SMOTE or class_weight='balanced'.")
+            if len(y) < 200:
+                warnings_list.append("Small training sample — metrics may be unstable.")
+            if not can_stratify:
+                warnings_list.append("Stratified split not possible due to rare classes.")
+
+            candidate_models = [
+                ("Logistic Regression",
+                 LogisticRegression(max_iter=500, n_jobs=-1, solver="saga",
+                                    class_weight="balanced")),
+                ("Decision Tree",
+                 DecisionTreeClassifier(max_depth=10, class_weight="balanced", random_state=42)),
+                ("Random Forest",
+                 RandomForestClassifier(n_estimators=150, n_jobs=-1, class_weight="balanced",
+                                        max_features="sqrt", random_state=42)),
+                ("Gradient Boosting",
+                 GradientBoostingClassifier(n_estimators=80, learning_rate=0.1,
+                                            max_depth=4, random_state=42)),
+                ("Extra Trees",
+                 ExtraTreesClassifier(n_estimators=150, n_jobs=-1, class_weight="balanced",
+                                      random_state=42)),
+                ("K-Nearest Neighbors",
+                 KNeighborsClassifier(n_neighbors=min(5, len(X_tr) // 10 or 1), n_jobs=-1)),
+            ]
+
+            cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42) if can_stratify \
+                 else KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+
+            for name, clf_model in candidate_models:
+                try:
+                    pipe = Pipeline([("preprocessor", preprocessor), ("model", clf_model)])
+                    # Cross-validation on training split
+                    cv_scores = cross_val_score(pipe, X_tr, y_tr, cv=cv,
+                                                scoring="f1_macro", n_jobs=-1)
+                    pipe.fit(X_tr, y_tr)
+                    y_pred = pipe.predict(X_te)
+                    acc = float(accuracy_score(y_te, y_pred))
+                    f1 = float(f1_score(y_te, y_pred, average="macro", zero_division=0))
+                    cv_mean = float(cv_scores.mean())
+                    cv_std = float(cv_scores.std())
+                    model_results.append({
+                        "model": name,
+                        "accuracy": round(acc, 4),
+                        "f1_macro": round(f1, 4),
+                        "cv_f1_mean": round(cv_mean, 4),
+                        "cv_f1_std": round(cv_std, 4),
+                        "stability": round(max(0.0, 1.0 - cv_std) * 100, 1),
+                        "is_best": False
+                    })
+                    # Select best by CV score (more stable than test score)
+                    if cv_mean > best_score:
+                        best_score = cv_mean
+                        best_pipeline = pipe
+                        best_model_name = name
+                except Exception as me:
+                    logger.warning(f"Model {name} failed: {me}")
+                    model_results.append({"model": name, "accuracy": None, "f1_macro": None,
+                                          "cv_f1_mean": None, "cv_f1_std": None,
+                                          "stability": None, "is_best": False, "error": str(me)})
+
+            # Mark best
+            for r in model_results:
+                if r["model"] == best_model_name:
+                    r["is_best"] = True
+
+            if best_pipeline:
+                y_pred_best = best_pipeline.predict(X_te)
+                clf_report = classification_report(y_te, y_pred_best,
+                                                   output_dict=True, zero_division=0)
+                conf_matrix = confusion_matrix(y_te, y_pred_best).tolist() \
+                    if len(classes_list) <= 25 else []
+
+            # ── Feature importance chart ──────────────────────────────────────────
+            feature_importance_chart = {}
+            top_features = []
+            if best_pipeline:
+                try:
+                    feat_names = best_pipeline.named_steps["preprocessor"].get_feature_names_out()
+                    top_features = _get_feature_importances(best_pipeline, feat_names)
+                    if top_features:
+                        fi_fig = go.Figure(go.Bar(
+                            x=[f["importance"] for f in top_features[:20]],
+                            y=[f["feature"] for f in top_features[:20]],
+                            orientation="h",
+                            marker_color="rgb(102,126,234)",
+                            hovertemplate="Feature: %{y}<br>Importance: %{x:.4f}<extra></extra>"
+                        ))
+                        fi_fig.update_layout(
+                            title=f"Top Feature Importances ({best_model_name})",
+                            xaxis_title="Importance",
+                            yaxis=dict(autorange="reversed"),
+                            template="plotly_dark",
+                            height=max(400, len(top_features[:20]) * 22),
+                            margin=dict(l=20, r=20, t=50, b=30)
+                        )
+                        feature_importance_chart = convert_plotly_figure_to_dict(fi_fig)
+                except Exception as fi_err:
+                    logger.warning(f"Feature importance chart failed: {fi_err}")
+
+            # ── Model comparison chart ────────────────────────────────────────────
+            model_comparison_chart = {}
+            try:
+                valid = [r for r in model_results if r.get("cv_f1_mean") is not None]
+                if valid:
+                    names_chart = [r["model"] for r in valid]
+                    acc_vals = [r["accuracy"] for r in valid]
+                    cv_vals = [r["cv_f1_mean"] for r in valid]
+                    colors = ["rgb(255,215,0)" if r["is_best"] else "rgb(102,126,234)" for r in valid]
+                    mc_fig = go.Figure()
+                    mc_fig.add_trace(go.Bar(
+                        name="Test Accuracy",
+                        x=names_chart, y=acc_vals,
+                        marker_color=colors,
+                        hovertemplate="%{x}<br>Accuracy: %{y:.4f}<extra></extra>"
+                    ))
+                    mc_fig.add_trace(go.Bar(
+                        name="CV F1 (mean)",
+                        x=names_chart, y=cv_vals,
+                        marker_color=["rgba(255,215,0,0.5)" if r["is_best"]
+                                      else "rgba(102,126,234,0.5)" for r in valid],
+                        hovertemplate="%{x}<br>CV F1: %{y:.4f}<extra></extra>"
+                    ))
+                    mc_fig.update_layout(
+                        title="Model Comparison — AutoML Tournament",
+                        barmode="group",
+                        yaxis_title="Score",
+                        template="plotly_dark",
+                        height=420,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    )
+                    model_comparison_chart = convert_plotly_figure_to_dict(mc_fig)
+            except Exception as mc_err:
+                logger.warning(f"Model comparison chart failed: {mc_err}")
+
+            best_metrics = next((r for r in model_results if r.get("is_best")), {})
+
+            return {
+                "success": True,
+                "target_column": target_column,
+                "task": "classification",
+                "classes": classes_list,
+                "num_classes": len(classes_list),
+                "best_model": best_model_name,
+                "best_metrics": {
+                    "accuracy": best_metrics.get("accuracy"),
+                    "f1_macro": best_metrics.get("f1_macro"),
+                    "cv_f1_mean": best_metrics.get("cv_f1_mean"),
+                    "cv_f1_std": best_metrics.get("cv_f1_std"),
+                    "stability": best_metrics.get("stability"),
+                },
+                "model_comparison": model_results,
+                "confusion_matrix": conf_matrix,
+                "classification_report": convert_to_json_serializable(clf_report),
+                "class_distribution": imbalance,
+                "selected_features": selected_features,
+                "top_features": top_features,
+                "feature_importance_chart": feature_importance_chart,
+                "model_comparison_chart": model_comparison_chart,
+                "train_size": len(X_tr),
+                "test_size": len(X_te),
+                "sampled_rows": len(df_sample),
+                "warnings": warnings_list
+            }
+
+        # ── Regression ────────────────────────────────────────────────────────────
+        else:
+            y = pd.to_numeric(data[target_column], errors="coerce")
+            data = data[y.notna()].copy()
+            y = y[y.notna()]
+            X = data[selected_features]
+
+            if len(y) < 20:
+                raise HTTPException(400, "Not enough rows for regression analysis.")
+
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+            cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+            warnings_list.append("Regression task detected (continuous target).")
+            if len(y) < 200:
+                warnings_list.append("Small training sample — regression metrics may be unstable.")
+
+            candidate_reg = [
+                ("Ridge Regression", Ridge()),
+                ("Decision Tree", DecisionTreeRegressor(max_depth=10, random_state=42)),
+                ("Random Forest", RandomForestRegressor(n_estimators=150, n_jobs=-1, random_state=42)),
+                ("Gradient Boosting", GradientBoostingRegressor(n_estimators=80, learning_rate=0.1,
+                                                                 max_depth=4, random_state=42)),
+                ("Extra Trees", ExtraTreesRegressor(n_estimators=150, n_jobs=-1, random_state=42)),
+            ]
+
+            for name, reg_model in candidate_reg:
+                try:
+                    pipe = Pipeline([("preprocessor", preprocessor), ("model", reg_model)])
+                    cv_scores = cross_val_score(pipe, X_tr, y_tr, cv=cv, scoring="r2", n_jobs=-1)
+                    pipe.fit(X_tr, y_tr)
+                    y_pred = pipe.predict(X_te)
+                    r2 = float(r2_score(y_te, y_pred))
+                    rmse = float(np.sqrt(mean_squared_error(y_te, y_pred)))
+                    mae = float(mean_absolute_error(y_te, y_pred))
+                    cv_mean = float(cv_scores.mean())
+                    cv_std = float(cv_scores.std())
+                    model_results.append({
+                        "model": name,
+                        "r2": round(r2, 4),
+                        "rmse": round(rmse, 4),
+                        "mae": round(mae, 4),
+                        "cv_r2_mean": round(cv_mean, 4),
+                        "cv_r2_std": round(cv_std, 4),
+                        "stability": round(max(0.0, 1.0 - cv_std) * 100, 1),
+                        "is_best": False
+                    })
+                    if cv_mean > best_score:
+                        best_score = cv_mean
+                        best_pipeline = pipe
+                        best_model_name = name
+                except Exception as me:
+                    logger.warning(f"Regression model {name} failed: {me}")
+                    model_results.append({"model": name, "r2": None, "rmse": None, "mae": None,
+                                          "cv_r2_mean": None, "cv_r2_std": None,
+                                          "stability": None, "is_best": False, "error": str(me)})
+
+            for r in model_results:
+                if r["model"] == best_model_name:
+                    r["is_best"] = True
+
+            # Feature importance
+            top_features = []
+            feature_importance_chart = {}
+            if best_pipeline:
+                try:
+                    feat_names = best_pipeline.named_steps["preprocessor"].get_feature_names_out()
+                    top_features = _get_feature_importances(best_pipeline, feat_names)
+                    if top_features:
+                        fi_fig = go.Figure(go.Bar(
+                            x=[f["importance"] for f in top_features[:20]],
+                            y=[f["feature"] for f in top_features[:20]],
+                            orientation="h",
+                            marker_color="rgb(102,126,234)",
+                            hovertemplate="Feature: %{y}<br>Importance: %{x:.4f}<extra></extra>"
+                        ))
+                        fi_fig.update_layout(
+                            title=f"Top Feature Importances ({best_model_name})",
+                            xaxis_title="Importance",
+                            yaxis=dict(autorange="reversed"),
+                            template="plotly_dark",
+                            height=max(400, len(top_features[:20]) * 22),
+                            margin=dict(l=20, r=20, t=50, b=30)
+                        )
+                        feature_importance_chart = convert_plotly_figure_to_dict(fi_fig)
+                except Exception as fi_err:
+                    logger.warning(f"Regression feature importance chart failed: {fi_err}")
+
+            # Comparison chart
+            model_comparison_chart = {}
+            try:
+                valid = [r for r in model_results if r.get("r2") is not None]
+                if valid:
+                    colors = ["rgb(255,215,0)" if r["is_best"] else "rgb(102,126,234)" for r in valid]
+                    mc_fig = go.Figure()
+                    mc_fig.add_trace(go.Bar(
+                        name="R² Score",
+                        x=[r["model"] for r in valid],
+                        y=[r["r2"] for r in valid],
+                        marker_color=colors,
+                        hovertemplate="%{x}<br>R²: %{y:.4f}<extra></extra>"
+                    ))
+                    mc_fig.add_trace(go.Bar(
+                        name="CV R² (mean)",
+                        x=[r["model"] for r in valid],
+                        y=[r["cv_r2_mean"] for r in valid],
+                        marker_color=["rgba(255,215,0,0.5)" if r["is_best"]
+                                      else "rgba(102,126,234,0.5)" for r in valid],
+                        hovertemplate="%{x}<br>CV R²: %{y:.4f}<extra></extra>"
+                    ))
+                    mc_fig.update_layout(
+                        title="Regression Model Comparison — AutoML Tournament",
+                        barmode="group",
+                        yaxis_title="R² Score",
+                        template="plotly_dark",
+                        height=420,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    )
+                    model_comparison_chart = convert_plotly_figure_to_dict(mc_fig)
+            except Exception as mc_err:
+                logger.warning(f"Regression comparison chart failed: {mc_err}")
+
+            best_reg_metrics = next((r for r in model_results if r.get("is_best")), {})
+
+            return {
+                "success": True,
+                "target_column": target_column,
+                "task": "regression",
+                "best_model": best_model_name,
+                "best_metrics": {
+                    "r2": best_reg_metrics.get("r2"),
+                    "rmse": best_reg_metrics.get("rmse"),
+                    "mae": best_reg_metrics.get("mae"),
+                    "cv_r2_mean": best_reg_metrics.get("cv_r2_mean"),
+                    "cv_r2_std": best_reg_metrics.get("cv_r2_std"),
+                    "stability": best_reg_metrics.get("stability"),
+                },
+                "model_comparison": model_results,
+                "selected_features": selected_features,
+                "top_features": top_features,
+                "feature_importance_chart": feature_importance_chart,
+                "model_comparison_chart": model_comparison_chart,
+                "train_size": len(X_tr),
+                "test_size": len(X_te),
+                "sampled_rows": len(df_sample),
+                "warnings": warnings_list
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Predictive analysis error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Predictive analysis failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IMAGE DATASET UPLOAD  (ZIP of images organised by class sub-folders)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _suggest_augmentations(stats: dict) -> list:
+    """Rule-based augmentation advisor for image datasets."""
+    suggestions = []
+
+    total = stats.get("total_images", 0)
+    n_classes = stats.get("num_classes", 1)
+    avg_per_class = total / max(1, n_classes)
+    imbalance_ratio = stats.get("class_imbalance_ratio", 1.0)
+
+    # Volume-based
+    if total < 500:
+        suggestions.append({
+            "technique": "Horizontal Flip",
+            "reason": "Very small dataset — doubles the effective training size cheaply.",
+            "priority": "High",
+            "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Vertical Flip",
+            "reason": "Useful when object orientation varies (e.g., aerial/medical images).",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomVerticalFlip(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Random Rotation (±30°)",
+            "reason": "Improves rotational invariance for small datasets.",
+            "priority": "High",
+            "code_hint": "transforms.RandomRotation(degrees=30)"
+        })
+    elif total < 2000:
+        suggestions.append({
+            "technique": "Horizontal Flip",
+            "reason": "Standard augmentation for moderate-sized datasets.",
+            "priority": "High",
+            "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Random Rotation (±15°)",
+            "reason": "Adds rotational variance without distortion.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomRotation(degrees=15)"
+        })
+
+    # Class imbalance
+    if imbalance_ratio > 3.0:
+        suggestions.append({
+            "technique": "Oversampling via Augmentation",
+            "reason": f"Class imbalance ratio is {imbalance_ratio:.1f}x — augment minority classes more aggressively.",
+            "priority": "High",
+            "code_hint": "Use WeightedRandomSampler or apply extra transforms to minority classes."
+        })
+
+    # Always suggest color jitter and normalize
+    suggestions.append({
+        "technique": "Color Jitter (brightness, contrast, saturation)",
+        "reason": "Improves generalization under different lighting/imaging conditions.",
+        "priority": "Medium",
+        "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3)"
+    })
+    suggestions.append({
+        "technique": "Random Crop / ResizedCrop",
+        "reason": "Forces the model to focus on different regions of the image.",
+        "priority": "Medium",
+        "code_hint": "transforms.RandomResizedCrop(224, scale=(0.8, 1.0))"
+    })
+    suggestions.append({
+        "technique": "Gaussian Blur / Noise",
+        "reason": "Simulates sensor noise and slight defocus.",
+        "priority": "Low",
+        "code_hint": "transforms.GaussianBlur(kernel_size=3)"
+    })
+    suggestions.append({
+        "technique": "Normalization (ImageNet stats)",
+        "reason": "Standardizes pixel distribution for faster convergence with pretrained models.",
+        "priority": "High",
+        "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"
+    })
+
+    # Domain-specific hints from stats
+    avg_w = stats.get("avg_width", 0)
+    avg_h = stats.get("avg_height", 0)
+    if avg_w > 512 or avg_h > 512:
+        suggestions.append({
+            "technique": "Resize / Center Crop to 224×224 or 256×256",
+            "reason": f"Images are large ({avg_w:.0f}×{avg_h:.0f}px). Resize for efficiency.",
+            "priority": "High",
+            "code_hint": "transforms.Resize(256), transforms.CenterCrop(224)"
+        })
+
+    is_grayscale = stats.get("is_predominantly_grayscale", False)
+    if not is_grayscale:
+        suggestions.append({
+            "technique": "Random Grayscale",
+            "reason": "Forces the model to not rely solely on colour cues.",
+            "priority": "Low",
+            "code_hint": "transforms.RandomGrayscale(p=0.1)"
+        })
+
+    # Deduplicate by technique name
+    seen = set()
+    deduped = []
+    for s in suggestions:
+        if s["technique"] not in seen:
+            seen.add(s["technique"])
+            deduped.append(s)
+
+    # Sort by priority
+    priority_order = {"High": 0, "Medium": 1, "Low": 2}
+    deduped.sort(key=lambda x: priority_order.get(x["priority"], 3))
+    return deduped
+
+
+@app.post("/api/upload-images")
+async def upload_image_dataset(file: UploadFile = File(...)):
+    """
+    Upload an image dataset as a ZIP file.
+    Expected structure: class_name/image.jpg (sub-folder per class) OR flat folder.
+    Returns: dataset_id, class stats, image stats, augmentation suggestions.
+    """
+    try:
+        if not file.filename.endswith(".zip"):
+            raise HTTPException(400, "Please upload a ZIP file containing your image dataset.")
+
+        contents = await file.read()
+        dataset_id = str(uuid.uuid4())
+
+        image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp"}
+        class_counts: Dict[str, int] = {}
+        widths, heights, channels = [], [], []
+        total_images = 0
+        sample_paths = []
+        grayscale_count = 0
+
+        with zipfile.ZipFile(io.BytesIO(contents)) as zf:
+            names = zf.namelist()
+            for name in names:
+                ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext not in image_extensions:
+                    continue
+                parts = [p for p in name.replace("\\", "/").split("/") if p]
+                if len(parts) >= 2:
+                    class_label = parts[-2]
+                else:
+                    class_label = "__root__"
+
+                class_counts[class_label] = class_counts.get(class_label, 0) + 1
+                total_images += 1
+
+                # Sample first 200 images for stats
+                if total_images <= 200:
+                    try:
+                        with zf.open(name) as img_file:
+                            img = Image.open(img_file)
+                            w, h = img.size
+                            widths.append(w)
+                            heights.append(h)
+                            mode = img.mode
+                            if mode == "L":
+                                channels.append(1)
+                                grayscale_count += 1
+                            elif mode in ("RGB", "BGR"):
+                                channels.append(3)
+                            elif mode == "RGBA":
+                                channels.append(4)
+                            else:
+                                channels.append(len(mode))
+                            if total_images <= 5:
+                                sample_paths.append(name)
+                    except Exception:
+                        pass
+
+        if total_images == 0:
+            raise HTTPException(400, "No valid images found in the ZIP file.")
+
+        # Compute stats
+        counts = list(class_counts.values())
+        imbalance_ratio = (max(counts) / max(1, min(counts))) if len(counts) > 1 else 1.0
+
+        stats = {
+            "total_images": total_images,
+            "num_classes": len(class_counts),
+            "class_distribution": class_counts,
+            "class_imbalance_ratio": round(float(imbalance_ratio), 2),
+            "avg_width": round(float(np.mean(widths)), 1) if widths else 0,
+            "avg_height": round(float(np.mean(heights)), 1) if heights else 0,
+            "min_width": int(min(widths)) if widths else 0,
+            "max_width": int(max(widths)) if widths else 0,
+            "min_height": int(min(heights)) if heights else 0,
+            "max_height": int(max(heights)) if heights else 0,
+            "avg_channels": round(float(np.mean(channels)), 1) if channels else 3,
+            "is_predominantly_grayscale": grayscale_count > len(widths) * 0.7 if widths else False,
+            "sample_image_paths": sample_paths
+        }
+
+        augmentation_suggestions = _suggest_augmentations(stats)
+
+        # Generate AI augmentation commentary
+        ai_commentary = ""
+        try:
+            ai_prompt = f"""You are a computer vision expert. Given this image dataset summary, give 3-4 concise sentences
+describing the most impactful data augmentation strategy:
+
+Dataset: {file.filename}
+Total images: {total_images}
+Classes ({len(class_counts)}): {dict(list(class_counts.items())[:10])}
+Avg image size: {stats['avg_width']:.0f}x{stats['avg_height']:.0f}px
+Class imbalance ratio: {imbalance_ratio:.1f}x
+Grayscale: {stats['is_predominantly_grayscale']}
+
+Focus on practical recommendations. No markdown, no bullet points. Plain text only."""
+            ai_commentary = get_gemini_response(ai_prompt, "lite")
+        except Exception:
+            ai_commentary = "AI commentary unavailable."
+
+        # Store as special image dataset
+        datasets[dataset_id] = {
+            "df": pd.DataFrame(),       # empty df — not tabular
+            "df_sample": pd.DataFrame(),
+            "filename": file.filename,
+            "uploaded_at": datetime.now().isoformat(),
+            "primary_keys": [],
+            "is_sampled": False,
+            "profile": {},
+            "analysis_cache": {},
+            "dataset_type": "image",
+            "image_stats": stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "ai_augmentation_commentary": ai_commentary
+        }
+        eda_results[dataset_id] = {"columns": {}, "dataset_type": "image"}
+
+        return {
+            "dataset_id": dataset_id,
+            "filename": file.filename,
+            "dataset_type": "image",
+            "stats": stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "ai_commentary": ai_commentary
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Image upload error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Image dataset upload failed: {str(e)}")
+
+
+@app.get("/api/augmentation/{dataset_id}")
+async def get_augmentation_suggestions(dataset_id: str):
+    """Return augmentation suggestions for an image dataset."""
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    ds = datasets[dataset_id]
+    if ds.get("dataset_type") != "image":
+        raise HTTPException(400, "This endpoint is for image datasets only.")
+    return {
+        "dataset_id": dataset_id,
+        "filename": ds["filename"],
+        "stats": ds.get("image_stats", {}),
+        "suggestions": ds.get("augmentation_suggestions", []),
+        "ai_commentary": ds.get("ai_augmentation_commentary", "")
+    }
+
+
+@app.get("/api/health-score/{dataset_id}")
+async def get_data_health_score(dataset_id: str):
+    """Return a composite data-health score (0-100) for the dataset."""
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    ds = datasets[dataset_id]
+    if ds.get("dataset_type") == "image":
+        return {"dataset_id": dataset_id, "health": {"overall": 100, "grade": "N/A (image dataset)"}}
+    df = ds["df"]
+    primary_keys = ds.get("primary_keys", [])
+    health = compute_data_health_score(df, primary_keys)
+    return {"dataset_id": dataset_id, "health": health}
+
 
 def parse_insights_into_sections(text: str) -> List[Dict]:
     """Parse AI response into sections"""
@@ -1885,6 +2965,10 @@ async def root():
             "insights": "GET /api/insights/{dataset_id}",
             "chat": "POST /api/chat",
             "query": "POST /api/query",
+            "predictive": "POST /api/predictive",
+            "upload_images": "POST /api/upload-images",
+            "augmentation": "GET /api/augmentation/{dataset_id}",
+            "health_score": "GET /api/health-score/{dataset_id}",
             "column_details": "GET /api/column/{dataset_id}/{column_name}",
             "export_ppt": "GET /api/export/{dataset_id}/ppt",
             "export_csv": "GET /api/export/{dataset_id}/csv",

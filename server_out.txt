@@ -1,0 +1,7 @@
+INFO:     127.0.0.1:51022 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51027 - "POST /api/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51029 - "POST /api/predictive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51033 - "GET /api/health-score/d6c26308-8e37-471e-84e6-15c4710647c0 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51037 - "POST /api/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51040 - "POST /api/predictive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51042 - "POST /api/upload-images HTTP/1.1" 200 OK
