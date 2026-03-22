@@ -3,6 +3,8 @@ import numpy as np
 import logging
 import json
 import math
+import re
+from difflib import SequenceMatcher
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -115,6 +117,99 @@ def read_and_validate_file(uploaded_file, sheet_name=None):
     except Exception as e:
         logging.error(f"Error reading file: {e}")
         return None
+
+
+# Suffix patterns that indicate autonomous/affiliated campus variations of the same institution
+_AUTONOMOUS_SUFFIXES = re.compile(
+    r'\s*(\(\s*AUTONOMOUS\s*(COLLEGES?)?\s*\)|[-,]\s*AUTONOMOUS|\(\s*AFFILIATED\s*\))\s*$',
+    re.IGNORECASE
+)
+
+
+def _anchor_word_deduplicate(series, anchor_threshold=0.85, max_unique=500):
+    """
+    Groups institution/organisation names that share the same BRAND/ANCHOR word
+    (the first meaningful word) into one canonical form.
+
+    Why anchor-word?
+    ----------------
+    South-Indian college names follow the pattern:
+      <BrandName>  [Engineering | College of Engineering | College of Technology | ...]
+    So "EXCEL ENGINEERING COLLEGE", "EXCEL COLLEGE OF ENGINEERING",
+    "EXCELL ENGINEERING COLLEGE" and "EXCEL ENGINEERING COLLEGE (AUTONOMOUS)"
+    all share the brand word "EXCEL" and must collapse to one value.
+    Similarly "PAAVAI ENGINEERING COLLEGE" and "PAAVAI COLLEGE OF ENGINEERING"
+    both have anchor "PAAVAI" and become one canonical entry.
+
+    Algorithm
+    ---------
+    1. Strip "(AUTONOMOUS)", "(AFFILIATED)" and similar campus-status suffixes.
+    2. Extract the first word of each unique value  ->  the *anchor*.
+    3. Cluster anchors using fuzzy similarity (SequenceMatcher >= anchor_threshold).
+       The most-frequent anchor's value becomes canonical for the whole cluster.
+    4. All full values whose anchor falls in the same cluster are mapped to the
+       most-frequent full value in that cluster.
+    5. Return (new_series, n_changed).
+
+    Guards
+    ------
+    - Only runs when 2 <= unique count <= max_unique.
+    - Anchor must be >= 3 characters to avoid collapsing short abbreviations.
+    """
+    n_unique = series.nunique()
+    if n_unique < 2 or n_unique > max_unique:
+        return series, 0
+
+    # Step 1 - strip autonomous/affiliate suffixes
+    def _strip_suffix(v):
+        if pd.isna(v):
+            return v
+        return _AUTONOMOUS_SUFFIXES.sub('', str(v)).strip()
+
+    cleaned = series.map(_strip_suffix)
+
+    # Step 2 - value counts (most-frequent first) on suffix-stripped values
+    value_counts = cleaned.value_counts()
+    unique_vals  = value_counts.index.tolist()   # sorted: most common first
+
+    def _first_word(v):
+        parts = str(v).split()
+        return parts[0] if parts else ''
+
+    anchors = [_first_word(v) for v in unique_vals]
+
+    # Step 3 - cluster anchors by fuzzy similarity
+    cluster_rep = []       # representative anchors (insertion order)
+    cluster_idx = {}       # rep_anchor -> [idx into unique_vals, ...]
+
+    for i, anchor in enumerate(anchors):
+        if len(anchor) < 3:          # keep very short anchors isolated
+            key = anchor + f'___{i}'
+            cluster_rep.append(key)
+            cluster_idx[key] = [i]
+            continue
+        matched_rep = None
+        for rep in cluster_rep:
+            real_rep = rep.split('___')[0]   # strip isolation suffix if any
+            if SequenceMatcher(None, anchor, real_rep).ratio() >= anchor_threshold:
+                matched_rep = rep
+                break
+        if matched_rep is None:
+            cluster_rep.append(anchor)
+            cluster_idx[anchor] = [i]
+        else:
+            cluster_idx[matched_rep].append(i)
+
+    # Step 4 - for each cluster, canonical = the most-frequent full value (indices[0])
+    val_to_canonical = {}
+    for rep, indices in cluster_idx.items():
+        canonical_val = unique_vals[indices[0]]   # most frequent (value_counts order)
+        for idx in indices:
+            val_to_canonical[unique_vals[idx]] = canonical_val
+
+    result = cleaned.map(lambda v: val_to_canonical.get(v, v) if pd.notna(v) else v)
+    n_merged = int((result.values != series.values).sum())
+    return result, n_merged
 
 
 def clean_data(df):
@@ -257,13 +352,44 @@ def clean_data(df):
             if missing_percentage > 50:
                 logging.info(f"Column '{col}' is highly missing: {missing_percentage:.1f}% (but kept)")
 
+        # Normalise string values: strip whitespace + uppercase
+        # This collapses duplicates caused by inconsistent casing
+        # e.g. "Excel Engineering College", "EXCEL ENGINEERING COLLEGE", "excel engineering college"
+        # → all become "EXCEL ENGINEERING COLLEGE" before dedup
+        for col in df.columns:
+            if col in converted_to_numeric:
+                continue  # already numeric — skip
+            if pd.api.types.is_object_dtype(df[col]):
+                df[col] = df[col].apply(
+                    lambda v: str(v).strip().upper() if pd.notna(v) and str(v).strip() not in ('', 'NAN', 'NONE', 'NULL') else v
+                )
+                logging.info(f"Normalised string values to UPPER in column '{col}'")
+
+        # Fuzzy deduplication: merge near-duplicate strings (typos, (AUTONOMOUS) suffixes,
+        # word-order variants) in every high-cardinality categorical column.
+        # Uses Python built-in difflib — no extra dependencies required.
+        for col in df.columns:
+            if col in converted_to_numeric:
+                continue
+            if not pd.api.types.is_object_dtype(df[col]):
+                continue
+            try:
+                new_series, n_merged = _anchor_word_deduplicate(df[col])
+                if n_merged > 0:
+                    df[col] = new_series
+                    logging.info(
+                        f"Anchor-word deduped '{col}': merged {n_merged} variant(s) into canonical forms"
+                    )
+            except Exception as e:
+                logging.warning(f"Fuzzy dedup skipped for '{col}': {e}")
+
         # Remove duplicates only
         initial_rows = len(df)
         df.drop_duplicates(inplace=True)
         duplicates_removed = initial_rows - len(df)
         if duplicates_removed > 0:
             logging.info(f"Removed {duplicates_removed} duplicate rows")
-        
+
         # Clean column names
         df.columns = [col.strip().lower().replace(' ', '_').replace('-', '_') for col in df.columns]
         
@@ -373,7 +499,7 @@ def enhanced_eda_json(df):
                         col_info["skewness"] = None
                         col_info["kurtosis"] = None
                 
-                elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+                elif pd.api.types.is_object_dtype(df[col]) or isinstance(df[col].dtype, pd.CategoricalDtype):
                     try:
                         # Value counts with NoData bucket
                         value_counts = df[col].value_counts(dropna=False)

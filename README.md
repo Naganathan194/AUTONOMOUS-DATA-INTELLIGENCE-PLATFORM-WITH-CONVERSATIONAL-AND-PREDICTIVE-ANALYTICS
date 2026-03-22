@@ -1,300 +1,251 @@
-# AI-Powered EDA Tool 🚀
+# Autonomous Data Intelligence Platform (ADIP)
 
-An intelligent Exploratory Data Analysis (EDA) platform that automates data analysis from CSV and XLSX files. Built with FastAPI backend and a modern web interface, featuring comprehensive statistics, interactive visualizations, and AI-powered natural language interaction using Google's Gemini LLM.
+ADIP is a FastAPI + single-page HTML app for two analytics modes in one interface:
 
-## 🌟 Features
+- Tabular analytics for CSV/XLSX/JSON datasets.
+- Image analytics for ZIP datasets, single images, or multiple image files.
 
-### 📊 Automated Data Analysis
-- **Comprehensive EDA**: Automatically generates statistical summaries, distributions, and data quality metrics
-- **Multiple Analysis Types**:
-  - Numerical Analysis: Histograms, box plots, descriptive statistics, skewness, kurtosis, and outlier detection
-  - Categorical Analysis: Value counts, bar charts, and pie charts with missing value handling
-  - Correlation Analysis: Interactive heatmaps showing relationships between numerical variables
-  - Outlier Detection: IQR-based outlier identification with visualizations
-  - Time Series Analysis: Automatic detection and analysis of temporal patterns
-  - Contour Plots: 3D surface visualizations for multivariate analysis
+The backend stores datasets in memory and caches computed analyses per dataset for fast tab switching.
 
-### 🤖 AI-Powered Features
-- **Intelligent Chatbot**: Ask questions about your dataset in natural language
-- **Natural Language Querying**: Execute data queries using conversational language (e.g., "Show me rows where age > 30")
-- **Automated Insights**: AI-generated insights organized into structured sections (Data Overview, Quality, Patterns, Findings, Recommendations)
-- **Context-Aware Responses**: Maintains conversation history for follow-up questions
+## What This Project Does
 
-### 📈 Interactive Visualizations
-- **Plotly Integration**: Interactive, responsive charts with zoom, pan, and hover details
-- **Real-time Updates**: Dynamic visualizations that adapt to data filtering
-- **Export Ready**: All visualizations can be exported as part of reports
+### Tabular workflow
 
-### 🔍 Data Exploration
-- **Advanced Filtering**: Filter by numeric ranges, categorical values, or multiple criteria
-- **Sorting & Pagination**: Sort by any column with configurable pagination
-- **Data Preview**: Interactive table view with search and navigation
-- **Column Details**: Deep dive into individual column statistics and distributions
+- Upload tabular data (`.csv`, `.xlsx`, `.xls`, `.json`)
+- Clean and normalize data (remove fully empty rows/columns, normalize strings, deduplicate, detect IDs)
+- Auto EDA with column-level stats and missing/duplicate summaries
+- Interactive analytics endpoints:
+  - Numerical distributions + boxplots
+  - Categorical distributions (bar/pie)
+  - Correlation heatmaps
+  - Outlier analysis (IQR + Z-score)
+  - Time series analysis
+  - Forecasting
+  - Anomaly detection (univariate + Isolation Forest)
+  - Contour/density plots
+- Data health score (`completeness`, `uniqueness`, `consistency`, `validity`)
+- AI insights and dataset chat
+- Natural-language query to executable pandas expression
+- ML Advisor:
+  - model recommendations
+  - model benchmarking
+  - AutoML-style predictive endpoint (classification/regression)
+- Export:
+  - PowerPoint EDA report
+  - Processed CSV
 
-### 💾 Export Capabilities
-- **PowerPoint Reports**: Generate comprehensive EDA reports as PowerPoint presentations
-- **CSV Export**: Download filtered or processed datasets
-- **Visual Export**: All charts are export-ready for presentations
+### Image workflow
 
-### 🛠️ Data Processing
-- **Smart Data Cleaning**: Automatic handling of duplicates, type detection, and missing values
-- **Intelligent Type Detection**: Automatically identifies numeric, categorical, datetime, and boolean columns
-- **Missing Value Handling**: Comprehensive reporting and visualization of missing data patterns
+- Upload modes:
+  - ZIP dataset (`class_name/image.ext` preferred)
+  - Single image
+  - Multiple images
+- Auto image profiling:
+  - class distribution and imbalance
+  - dimensions/channels/grayscale detection
+  - representative previews
+- Augmentation intelligence:
+  - rule-based suggestions
+  - domain-aware recommendations
+  - generated preview variants (flip/rotation/contrast/blur/etc.)
+- AI vision insights using LLaVA + structured section output for CV planning
 
-## 🏗️ Architecture
+## Architecture
 
-### Backend
-- **FastAPI**: High-performance async API framework (runs on port 8000)
-- **Pandas**: Data manipulation and analysis
-- **NumPy**: Numerical computations
-- **Plotly**: Interactive visualizations
-- **Google Generative AI (Gemini)**: LLM integration for chat and query generation
+- Backend: FastAPI app in `main.py`
+- Frontend: static SPA in `index.html` (Tailwind + Plotly)
+- Data/EDA helpers: `clean_and_EDA_generate.py`
+- PPT export: `generate_report.py`
+- AI adapters: `utils.py`
+- SQL helper module: `smart_query.py` (present in repo; not currently wired into FastAPI routes)
 
-### Frontend
-- **HTML/CSS/JavaScript**: Modern single-page application (served on port 3000)
-- **Tailwind CSS**: Utility-first styling with glassmorphism effects
-- **Plotly.js**: Client-side interactive chart rendering
+## AI Model Usage (Important)
 
-## 📦 Installation
+This project uses both local and cloud AI paths:
 
-### Prerequisites
-- Python 3.8 or higher
-- Google Gemini API key
+- Local via Ollama:
+  - text model: `llama3.1:8b`
+  - vision model: `llava`
+  - used for image commentary/vision analysis and several local text-generation tasks
+- Cloud via Gemini API:
+  - used by `/api/insights/{dataset_id}`, `/api/chat`, and `/api/query`
+  - requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 
-### Setup
+If Gemini keys are missing, Gemini-backed endpoints return explicit error messages.
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Naganathan194/AI-ENABLED-AUTOMATED-EDA-TOOL-WITH-INTELLIGENT-CHATBOT-FOR-DATA-INSIGHTS-LLM-BI.git
-   cd AI-ENABLED-AUTOMATED-EDA-TOOL-WITH-INTELLIGENT-CHATBOT-FOR-DATA-INSIGHTS-LLM-BI
-   ```
+## Requirements
 
-2. **Create a virtual environment**
-   
-   On **Windows**:
-   ```bash
-   python -m venv venv
-   ```
-   
-   On **macOS/Linux**:
-   ```bash
-   python3 -m venv venv
-   ```
+- Python 3.10+ recommended
+- Ollama installed and running (`ollama serve`)
+- Optional but recommended: Gemini API key for tabular AI endpoints
 
-3. **Activate the virtual environment**
-   
-   On **Windows** (PowerShell):
-   ```bash
-   venv\Scripts\Activate.ps1
-   ```
-   
-   On **Windows** (Command Prompt):
-   ```bash
-   venv\Scripts\activate.bat
-   ```
-   
-   On **macOS/Linux**:
-   ```bash
-   source venv/bin/activate
-   ```
+## Setup
 
-   You should see `(venv)` at the beginning of your terminal prompt.
+1. Create and activate a virtual environment.
 
-4. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+Windows (PowerShell):
 
-5. **Configure Gemini API**
-   
-   Create a `.env` file in the root directory:
-   ```env
-   GEMINI_API_KEY=your_api_key_here
-   ```
-   
-   Alternatively, set it as an environment variable:
-   
-   On **Windows** (PowerShell):
-   ```powershell
-   $env:GEMINI_API_KEY="your_api_key_here"
-   ```
-   
-   On **Windows** (Command Prompt):
-   ```cmd
-   set GEMINI_API_KEY=your_api_key_here
-   ```
-   
-   On **macOS/Linux**:
-   ```bash
-   export GEMINI_API_KEY=your_api_key_here
-   ```
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
 
-## 🚀 Running the Application
+macOS/Linux:
 
-The application requires two separate terminals - one for the backend and one for the frontend.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-### Terminal 1 - Backend Server (Port 8000)
+2. Install dependencies.
 
-Make sure your virtual environment is activated, then run:
+```bash
+pip install -r requirements.txt
+```
+
+3. Configure environment variables in `.env`.
+
+```env
+GEMINI_API_KEY=your_key_here
+# optional
+GEMINI_MODEL=gemini-2.5-flash-lite
+```
+
+4. Pull Ollama models.
+
+```bash
+ollama pull llama3.1:8b
+ollama pull llava
+```
+
+## Run
+
+Use two terminals.
+
+Terminal 1 (backend):
 
 ```bash
 python main.py
 ```
 
-You should see output indicating the FastAPI server is running:
-```
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-The backend API will be available at `http://localhost:8000`
-
-### Terminal 2 - Frontend Server (Port 3000)
-
-In a **new terminal window** (with virtual environment activated), navigate to the project directory and run:
+Terminal 2 (frontend static server):
 
 ```bash
 python -m http.server 3000
 ```
 
-You should see output like:
-```
-Serving HTTP on 0.0.0.0 port 3000 (http://0.0.0.0:3000/) ...
-```
+Open:
 
-### Access the Application
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
 
-1. Open your web browser
-2. Navigate to `http://localhost:3000`
-3. The frontend will automatically communicate with the backend API at `http://localhost:8000`
+## API Endpoints
 
-**Note**: Make sure both servers are running simultaneously for the application to work properly.
+### General
 
-## 📖 Usage
+- `GET /`
+- `GET /health`
+- `GET /api/datasets`
+- `GET /api/dataset/{dataset_id}`
+- `DELETE /api/dataset/{dataset_id}`
 
-### Getting Started
+### Tabular upload + analysis
 
-1. **Upload a Dataset**
-   - Click "Upload Dataset" button
-   - Select a CSV or XLSX file
-   - The system automatically processes and analyzes your data
+- `POST /api/upload`
+- `GET /api/analyze/{dataset_id}/numerical`
+- `GET /api/analyze/{dataset_id}/categorical`
+- `GET /api/analyze/{dataset_id}/correlations`
+- `GET /api/analyze/{dataset_id}/outliers`
+- `GET /api/analyze/{dataset_id}/timeseries`
+- `GET /api/analyze/{dataset_id}/forecast`
+- `GET /api/analyze/{dataset_id}/anomaly`
+- `GET /api/analyze/{dataset_id}/contour`
+- `POST /api/explore`
+- `GET /api/insights/{dataset_id}`
+- `POST /api/chat`
+- `POST /api/query`
+- `GET /api/column/{dataset_id}/{column_name}`
+- `GET /api/health-score/{dataset_id}`
 
-2. **Explore Your Data**
-   - Navigate through different analysis tabs (Numerical, Categorical, Correlations, etc.)
-   - View interactive visualizations
-   - Check out automated insights
+### ML advisor + predictive
 
-3. **Ask Questions**
-   - Use the Chat tab to ask natural language questions about your dataset
-   - Try queries like:
-     - "What is the average age in the dataset?"
-     - "Show me the distribution of disease types"
-     - "What are the top 10 rows by hospital visits?"
+- `GET /api/ml-recommendations/{dataset_id}`
+- `POST /api/ml-benchmark/{dataset_id}`
+- `POST /api/predictive`
 
-4. **Export Results**
-   - Generate PowerPoint reports with all visualizations
-   - Export filtered datasets as CSV
+### Image upload + vision
 
-### API Endpoints
+- `POST /api/upload-images` (ZIP datasets)
+- `POST /api/upload-single-image`
+- `POST /api/upload-multiple-images`
+- `GET /api/image-analysis/{dataset_id}`
+- `GET /api/image-ai-insights/{dataset_id}`
+- `GET /api/augmentation/{dataset_id}`
 
-The application provides a RESTful API:
+### Export
 
-- `POST /api/upload` - Upload and process a dataset
-- `GET /api/datasets` - List all uploaded datasets
-- `GET /api/dataset/{dataset_id}` - Get dataset information
-- `GET /api/analyze/{dataset_id}/numerical` - Numerical analysis
-- `GET /api/analyze/{dataset_id}/categorical` - Categorical analysis
-- `GET /api/analyze/{dataset_id}/correlations` - Correlation analysis
-- `GET /api/analyze/{dataset_id}/outliers` - Outlier detection
-- `GET /api/analyze/{dataset_id}/timeseries` - Time series analysis
-- `GET /api/analyze/{dataset_id}/contour` - Contour plot analysis
-- `POST /api/explore` - Data exploration with filtering
-- `POST /api/chat` - Chat with AI about dataset
-- `POST /api/query` - Execute natural language queries
-- `GET /api/insights/{dataset_id}` - Generate AI insights
-- `GET /api/export/{dataset_id}/ppt` - Export PowerPoint report
-- `GET /api/export/{dataset_id}/csv` - Export CSV
-- `DELETE /api/dataset/{dataset_id}` - Delete dataset
+- `GET /api/export/{dataset_id}/ppt`
+- `GET /api/export/{dataset_id}/csv`
 
-## 🎯 Key Capabilities
+## Frontend Tabs
 
-### For Technical Users
-- Programmatic API access for integration
-- Advanced filtering and querying options
-- Export capabilities for further analysis
-- Detailed statistical summaries
+### Tabular dashboard tabs
 
-### For Non-Technical Users
-- Intuitive web interface
-- Natural language interaction
-- Automated insights generation
-- One-click report generation
-- Visual, interactive data exploration
+- Overview
+- Numerical
+- Categorical
+- Correlations
+- Outliers
+- Time Series
+- AI Insights
+- ML Advisor
+- Ask AI
+- Explorer
 
-## 🔧 Configuration
+### Image dashboard tabs
 
-### Environment Variables
-- `GEMINI_API_KEY`: Required for AI features (chat, queries, insights)
+- Overview
+- AI Content Insights
+- Augmentation
+- Previews
+- Vision Models
 
-### Customization
-- Modify analysis parameters in `clean_and_EDA_generate.py`
-- Adjust visualization styles in `main.py`
-- Customize frontend styling in `index.html`
+## Repository Structure
 
-## 📝 Project Structure
-
-```
-AI-ENABLED-AUTOMATED-EDA-TOOL-WITH-INTELLIGENT-CHATBOT-FOR-DATA-INSIGHTS-LLM-BI/
-├── main.py                 # FastAPI backend application
-├── index.html              # Frontend interface
-├── clean_and_EDA_generate.py  # Data cleaning and EDA generation
-├── generate_report.py      # PowerPoint report generation
-├── utils.py                # Gemini LLM integration utilities
-├── smart_query.py          # Natural language query processing
-├── requirements.txt        # Python dependencies
-├── venv/                   # Virtual environment (created after setup)
-└── .env                    # Environment variables (create this)
+```text
+.
+├─ main.py
+├─ index.html
+├─ clean_and_EDA_generate.py
+├─ generate_report.py
+├─ smart_query.py
+├─ utils.py
+├─ requirements.txt
+├─ server_err.txt
+├─ server_out.txt
+├─ README.md
+└─ LICENSE
 ```
 
-## 🛠️ Troubleshooting
+## Notes From Current Logs
 
-### Backend not starting
-- Ensure port 8000 is not already in use
-- Check that all dependencies are installed: `pip install -r requirements.txt`
-- Verify your Gemini API key is set correctly
+- Server starts correctly on `0.0.0.0:8000`.
+- Upload + predictive routes have successful responses in sample logs.
+- Primary-key detection can classify highly unique business columns as IDs (expected by current heuristics).
 
-### Frontend not connecting to backend
-- Ensure both servers are running
-- Check that the backend is accessible at `http://localhost:8000`
-- Verify CORS settings if accessing from a different origin
+## Troubleshooting
 
-### Virtual environment issues
-- Make sure you've activated the virtual environment (should see `(venv)` in terminal)
-- Recreate virtual environment if needed: `deactivate` → delete `venv/` → recreate and reinstall
+- Backend does not start:
+  - reinstall deps: `pip install -r requirements.txt`
+  - check port `8000` availability
+- Frontend cannot call API:
+  - ensure backend is running on `http://localhost:8000`
+  - serve frontend from `http://localhost:3000`
+- AI endpoints fail:
+  - ensure Ollama is running: `ollama serve`
+  - ensure required models are pulled (`llama3.1:8b`, `llava`)
+  - set `GEMINI_API_KEY` for `/api/insights`, `/api/chat`, `/api/query`
 
-## 🚀 Future Enhancements
+## License
 
-- Database integration for persistent storage
-- User authentication and multi-user support
-- Additional visualization types
-- Real-time collaboration features
-- Custom ML model integration
-- Advanced statistical tests
-
-## 📄 License
-
-MIT License 2025
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📧 Contact
-
-
-- 📧 Email: [naganathan@gmail.com](mailto:naganathan@gmail.com)  
-- 🐙 GitHub: [Naganathan194](https://github.com/Naganathan194)  
-
----
-
-**Note**: This tool is designed to make data exploration accessible to both technical and non-technical users, combining the power of automated analysis with intuitive natural language interaction.
-
+MIT License (see `LICENSE`)

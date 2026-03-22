@@ -16,25 +16,31 @@ import uuid
 import logging
 
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler, FunctionTransformer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (accuracy_score, f1_score, confusion_matrix, classification_report,
-                              mean_squared_error, r2_score, mean_absolute_error)
+                              mean_squared_error, r2_score, mean_absolute_error,
+                              precision_score, recall_score)
 from sklearn.linear_model import LogisticRegression, Ridge, LinearRegression
 from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
                                ExtraTreesClassifier, RandomForestRegressor,
-                               GradientBoostingRegressor, ExtraTreesRegressor)
+                               GradientBoostingRegressor, ExtraTreesRegressor,
+                               BaggingRegressor)
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.linear_model import Lasso
+from sklearn.svm import SVC, SVR
+from sklearn.neural_network import MLPClassifier, MLPRegressor
 import zipfile
+import base64
 from PIL import Image
 
 # Import your existing modules
 from clean_and_EDA_generate import enhanced_eda_json, clean_data, read_and_validate_file
 from generate_report import generate_eda_report_ppt
-from utils import get_gemini_response
+from utils import get_gemini_response, get_ollama_vision_response, get_gemini_api_response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -362,15 +368,20 @@ def is_numeric_column(df: pd.DataFrame, col: str) -> bool:
             # Numeric if: more than 10 unique values OR unique ratio > 10%
             return unique_count > 10 or unique_ratio > 0.1
         
-        # Try converting to numeric
-        test_series = pd.to_numeric(df[col], errors='coerce')
+        # Try converting to numeric with strict conversion ratio against non-null source values
+        src_non_null = df[col].dropna()
+        if len(src_non_null) == 0:
+            return False
+
+        test_series = pd.to_numeric(src_non_null, errors='coerce')
         non_null_converted = test_series.dropna()
-        
-        # If more than 50% can be converted and has enough unique values
-        if len(non_null_converted) > len(df) * 0.5:
+        conversion_ratio = len(non_null_converted) / len(src_non_null)
+
+        # Require high convertibility to avoid treating mixed alphanumeric IDs as numeric
+        if conversion_ratio >= 0.9:
             unique_count = non_null_converted.nunique()
             unique_ratio = unique_count / len(non_null_converted) if len(non_null_converted) > 0 else 0
-            return unique_count > 10 or unique_ratio > 0.1
+            return unique_count > 5 or unique_ratio > 0.05
         
         return False
     except Exception as e:
@@ -379,101 +390,89 @@ def is_numeric_column(df: pd.DataFrame, col: str) -> bool:
 
 def is_sensible_numeric_column(df: pd.DataFrame, col: str, eda_info: dict = None, primary_keys: List[str] = None) -> bool:
     """
-    Use LLM to determine if a numeric column is sensible for statistical analysis.
-    Returns False for ID columns, mobile numbers, and other non-analyzable numeric columns.
+    Heuristic-only check (no LLM calls) — fast and deterministic.
+    Returns False for ID columns, phone numbers, zip-codes, and other non-analysable
+    numeric columns.  Returns True for measurements, scores, prices, ages, etc.
     """
     try:
-        # Check if column is in primary keys list (if provided)
+        # ── Primary-key list check ────────────────────────────────────────────
         if primary_keys and col in primary_keys:
-            logger.info(f"Column '{col}' is a detected primary key - skipping numeric analysis")
+            logger.info(f"Column '{col}' is a detected primary key – skipping numeric analysis")
             return False
-        
-        # Quick heuristic checks first (faster than LLM)
-        col_lower = col.lower()
-        
-        # Common ID/identifier patterns
-        id_patterns = ['id', 'identifier', 'key', 'code', 'number', 'num', 'no', 'ref', 'reference']
-        mobile_patterns = ['mobile', 'phone', 'contact', 'tel', 'cell']
-        
-        # Check column name patterns
-        if any(pattern in col_lower for pattern in id_patterns):
-            # Check if it's likely an ID (high uniqueness, sequential, or all unique)
-            unique_count = df[col].nunique()
-            total_count = len(df)
-            unique_ratio = unique_count / total_count if total_count > 0 else 0
-            
-            # If almost all values are unique, it's likely an ID
-            if unique_ratio > 0.95:
-                logger.info(f"Column '{col}' identified as ID (unique ratio: {unique_ratio:.2%})")
+
+        col_lower = col.lower().replace('_', '').replace(' ', '')
+        total_count = len(df)
+        if total_count == 0:
+            return False
+        unique_count = df[col].nunique(dropna=True)
+        unique_ratio = unique_count / total_count
+
+        # ── Near-unique columns are very likely identifiers ───────────────────
+        if unique_ratio > 0.97:
+            logger.info(f"Column '{col}' skipped (unique ratio {unique_ratio:.2%} – likely identifier)")
+            return False
+
+        # ── ID / reference / code patterns in column name ─────────────────────
+        id_name_patterns = [
+            'id', 'identifier', 'key', 'pk', 'guid', 'uuid',
+            'code', 'ref', 'reference', 'serial', 'index',
+            'number', 'num', 'no', 'nr',
+        ]
+        if any(col_lower == p or col_lower.endswith(p) or col_lower.startswith(p)
+               for p in id_name_patterns):
+            if unique_ratio > 0.80:
+                logger.info(f"Column '{col}' skipped (ID-like name + unique ratio {unique_ratio:.2%})")
                 return False
-        
-        # Check for mobile number patterns
-        if any(pattern in col_lower for pattern in mobile_patterns):
-            # Check if values look like phone numbers (10+ digits, mostly unique)
-            sample_values = df[col].dropna().head(20)
-            if len(sample_values) > 0:
-                # Check if values are long integers (phone numbers are typically 10+ digits)
-                numeric_values = pd.to_numeric(sample_values, errors='coerce').dropna()
-                if len(numeric_values) > 0:
-                    min_val = numeric_values.min()
-                    max_val = numeric_values.max()
-                    # Phone numbers are typically 10-15 digits
-                    if min_val >= 1000000000 and max_val < 1e15:
-                        unique_count = df[col].nunique()
-                        if unique_count / len(df) > 0.8:  # Mostly unique
-                            logger.info(f"Column '{col}' identified as mobile/phone number")
-                            return False
-        
-        # If heuristics don't rule it out, use LLM for final decision
-        if eda_info and col in eda_info.get("columns", {}):
-            col_info = eda_info["columns"][col]
-            
-            # Prepare sample data for LLM
-            sample_data = df[col].dropna().head(10).tolist()
-            unique_count = df[col].nunique()
-            total_count = len(df)
-            
-            prompt = f"""Analyze this numeric column from a dataset and determine if it's sensible for statistical analysis and visualization.
 
-Column Name: {col}
-Data Type: {col_info.get('dtype', 'unknown')}
-Total Rows: {total_count}
-Unique Values: {unique_count}
-Sample Values: {sample_data[:10]}
-
-Consider these guidelines:
-- ID columns (like Candidate Id, User ID, etc.) should return FALSE
-- Mobile/Phone numbers should return FALSE
-- Reference numbers, codes, or identifiers should return FALSE
-- Measurements, counts, scores, ratings, prices, ages, etc. should return TRUE
-- Columns where statistical analysis (mean, median, distribution) makes sense should return TRUE
-
-Respond with ONLY "TRUE" or "FALSE" (all caps, no other text)."""
-
-            try:
-                response = get_gemini_response(prompt, "lite")
-                result = response.strip().upper()
-                
-                if "FALSE" in result:
-                    logger.info(f"LLM determined column '{col}' is NOT sensible for analysis")
+        # ── Phone / mobile number patterns ────────────────────────────────────
+        phone_name_patterns = ['mobile', 'phone', 'contact', 'tel', 'cell', 'fax', 'whatsapp']
+        if any(p in col_lower for p in phone_name_patterns):
+            sample_vals = pd.to_numeric(df[col].dropna().head(20), errors='coerce').dropna()
+            if len(sample_vals) > 0:
+                min_v, max_v = float(sample_vals.min()), float(sample_vals.max())
+                # Phone numbers: 7-15 digit integers
+                if min_v >= 1_000_000 and max_v < 1e16 and unique_ratio > 0.70:
+                    logger.info(f"Column '{col}' skipped (phone/mobile number pattern)")
                     return False
-                elif "TRUE" in result:
-                    logger.info(f"LLM determined column '{col}' IS sensible for analysis")
-                    return True
-                else:
-                    # If LLM response is unclear, default to True (analyze it)
-                    logger.warning(f"Unclear LLM response for '{col}': {response}. Defaulting to True.")
-                    return True
-            except Exception as llm_error:
-                logger.warning(f"LLM check failed for '{col}': {llm_error}. Defaulting to True.")
-                return True
-        
-        # Default to True if we can't determine
+
+        # ── Zip / postal / SSN / PIN / Aadhaar patterns ───────────────────────
+        special_id_patterns = ['zip', 'postal', 'pincode', 'pin', 'ssn', 'aadhaar',
+                                'passport', 'nic', 'pancard', 'reg', 'account', 'acct']
+        if any(p in col_lower for p in special_id_patterns):
+            if unique_ratio > 0.60:
+                logger.info(f"Column '{col}' skipped (special ID pattern: {col})")
+                return False
+
+        # ── Columns with very few unique values and name suggests a code ──────
+        if unique_count <= 1:
+            return False  # constant column – useless for analysis
+
         return True
-        
+
     except Exception as e:
-        logger.warning(f"Error checking if '{col}' is sensible numeric: {str(e)}")
-        return True  # Default to analyzing if check fails
+        logger.warning(f"Error checking sensible numeric for '{col}': {e}")
+        return True  # Default: include column
+
+
+def _get_sensible_numeric_cols(df: pd.DataFrame, dataset_info: dict) -> List[str]:
+    """
+    Return list of numeric columns that are sensible for analysis, using the
+    pre-computed sensible_cache stored during upload for instant lookup.
+    Falls back to calling is_sensible_numeric_column directly if no cache.
+    """
+    primary_keys = dataset_info.get("primary_keys", [])
+    sensible_cache = dataset_info.get("sensible_cache")
+    result = []
+    for col in df.columns:
+        if not is_numeric_column(df, col):
+            continue
+        if sensible_cache is not None:
+            if sensible_cache.get(col, True):
+                result.append(col)
+        else:
+            if is_sensible_numeric_column(df, col, primary_keys=primary_keys):
+                result.append(col)
+    return result
 
 def is_categorical_column(df: pd.DataFrame, col: str, primary_keys: List[str] = None) -> bool:
     """Determine if column should be treated as categorical.
@@ -495,7 +494,7 @@ def is_categorical_column(df: pd.DataFrame, col: str, primary_keys: List[str] = 
             return False
         
         # Object/string types
-        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+        if pd.api.types.is_object_dtype(df[col]) or isinstance(df[col].dtype, pd.CategoricalDtype):
             # Additional check: if it's an email-like column (contains @) and high uniqueness, skip it
             col_lower = col.lower()
             if ('email' in col_lower or 'mail' in col_lower) and unique_ratio > 0.8:
@@ -662,10 +661,25 @@ async def upload_dataset(file: UploadFile = File(...)):
         try:
             if file.filename.endswith('.csv'):
                 df = pd.read_csv(io.BytesIO(contents))
-            elif file.filename.endswith('.xlsx'):
+            elif file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
                 df = pd.read_excel(io.BytesIO(contents))
+            elif file.filename.endswith('.json'):
+                try:
+                    json_data = json.loads(contents.decode('utf-8'))
+                    if isinstance(json_data, list):
+                        df = pd.DataFrame(json_data)
+                    elif isinstance(json_data, dict):
+                        # Try records orientation first, then orient='index', then wrap
+                        if any(isinstance(v, dict) for v in json_data.values()):
+                            df = pd.DataFrame.from_dict(json_data, orient='index')
+                        else:
+                            df = pd.DataFrame([json_data])
+                    else:
+                        raise HTTPException(400, "JSON must be an array of objects or a flat object.")
+                except (json.JSONDecodeError, UnicodeDecodeError) as je:
+                    raise HTTPException(400, f"Invalid JSON file: {str(je)}")
             else:
-                raise HTTPException(400, "Unsupported file format. Use CSV or XLSX.")
+                raise HTTPException(400, "Unsupported file format. Use CSV, XLSX, or JSON.")
         except Exception as read_error:
             logger.error(f"Error reading file {file.filename}: {str(read_error)}")
             raise HTTPException(400, f"Failed to read file: {str(read_error)}")
@@ -759,6 +773,13 @@ async def upload_dataset(file: UploadFile = File(...)):
         # Detect primary keys
         primary_keys = detect_primary_keys(df)
 
+        # Pre-compute sensible-numeric cache so all downstream analysis endpoints
+        # reuse the result instead of re-checking column by column every time.
+        sensible_cache: Dict[str, bool] = {}
+        for _col in df_sample.columns:
+            if is_numeric_column(df_sample, _col):
+                sensible_cache[_col] = is_sensible_numeric_column(df_sample, _col, eda, primary_keys)
+
         # Enrich EDA with sampling metadata
         eda["sampled_rows"] = len(df_sample)
         eda["sample_ratio"] = round(len(df_sample) / max(1, len(df)), 4)
@@ -775,7 +796,8 @@ async def upload_dataset(file: UploadFile = File(...)):
             "primary_keys": primary_keys,
             "is_sampled": is_sampled,
             "profile": profile,
-            "analysis_cache": {}
+            "analysis_cache": {},
+            "sensible_cache": sensible_cache
         }
         eda_results[dataset_id] = eda
         
@@ -879,28 +901,13 @@ async def get_numerical_analysis(dataset_id: str):
     try:
         df = datasets[dataset_id]["df"]
         df_visual = datasets[dataset_id].get("df_sample", df)
-        eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
-        
-        # First, get all numeric columns
+
         all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
-        logger.info(f"Numerical: {len(all_numeric_cols)} numeric columns found: {all_numeric_cols}")
-        
-        # Filter out non-sensible numeric columns (IDs, mobile numbers, etc.)
-        sensible_numeric_cols = []
-        skipped_cols = []
-        
-        for col in all_numeric_cols:
-            if is_sensible_numeric_column(df_visual, col, eda, primary_keys):
-                sensible_numeric_cols.append(col)
-            else:
-                skipped_cols.append(col)
-                logger.info(f"Skipping non-sensible numeric column: {col}")
-        
-        logger.info(f"After filtering: {len(sensible_numeric_cols)} sensible numeric columns: {sensible_numeric_cols}")
-        if skipped_cols:
-            logger.info(f"Skipped {len(skipped_cols)} non-sensible columns: {skipped_cols}")
-        
+        sensible_numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+        skipped_cols = [c for c in all_numeric_cols if c not in sensible_numeric_cols]
+        logger.info(f"Numerical: {len(sensible_numeric_cols)} sensible / {len(all_numeric_cols)} total numeric cols")
+
         if not sensible_numeric_cols:
             message = "No sensible numeric columns found in dataset"
             if skipped_cols:
@@ -1235,13 +1242,11 @@ async def get_correlation_analysis(dataset_id: str):
     try:
         df = datasets[dataset_id]["df"]
         df_visual = datasets[dataset_id].get("df_sample", df)
-        eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
-        
-        # Get all numeric columns and filter out non-sensible ones
+
         all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
-        logger.info(f"Correlation: {len(numeric_cols)} sensible numeric columns found (out of {len(all_numeric_cols)} total): {numeric_cols}")
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+        logger.info(f"Correlation: {len(numeric_cols)} sensible / {len(all_numeric_cols)} total numeric cols")
         if len(numeric_cols) < 2:
             return {"type": "correlations", "error": "Not enough numeric columns (at least 2 required)", "numeric_columns_found": len(numeric_cols), "columns": numeric_cols, "strong_correlations": [], "visualizations": []}
         numeric_df = df_visual[numeric_cols].apply(pd.to_numeric, errors='coerce')
@@ -1311,14 +1316,12 @@ async def get_outliers_analysis(dataset_id: str):
     try:
         df = datasets[dataset_id]["df"]
         df_visual = datasets[dataset_id].get("df_sample", df)
-        eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
-        
-        # Get all numeric columns and filter out non-sensible ones (including primary keys)
+
         all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
-        logger.info(f"Outliers: {len(numeric_cols)} sensible numeric columns found (out of {len(all_numeric_cols)} total): {numeric_cols}")
-        
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+        logger.info(f"Outliers: {len(numeric_cols)} sensible / {len(all_numeric_cols)} total numeric cols")
+
         if not numeric_cols:
             return {
                 "type": "outliers",
@@ -1445,51 +1448,62 @@ async def get_timeseries_analysis(dataset_id: str):
         df = datasets[dataset_id]["df"]
         df_visual = downsample_ordered(df, MAX_EDA_SAMPLE_ROWS)
         
-        # Try to detect date/time columns - be strict: only accept actual datetime columns
+        # Detect date/time columns robustly:
+        # Step 1 – columns already parsed to datetime64 by clean_data()
+        # Step 2 – string/object columns that can be parsed as dates (coerce mode, 50% threshold)
         date_cols = []
         for col in df_visual.columns:
-            # Skip if column is already numeric (not a date)
+            # ── Step 1: dtype is already datetime64 ──────────────────────────
+            if pd.api.types.is_datetime64_any_dtype(df_visual[col]):
+                date_cols.append(col)
+                logger.info(f"Detected pre-parsed datetime column: {col} (dtype={df_visual[col].dtype})")
+                continue
+
+            # ── Skip pure numeric types (int / float = measurements, not dates) ─
             if pd.api.types.is_numeric_dtype(df_visual[col]):
                 continue
-            
-            # Try strict datetime conversion
+
+            # ── Step 2: try parsing string/object column as datetime ──────────
             try:
-                # Attempt to convert entire column to datetime
-                test_series = pd.to_datetime(df_visual[col], errors='raise', format='mixed')
-                
-                # Check if conversion was successful and has valid datetime values
-                valid_count = test_series.notna().sum()
-                if valid_count > len(df_visual) * 0.8:  # At least 80% valid datetime values
-                    # Check if it's actually a datetime type or datetime64
-                    if pd.api.types.is_datetime64_any_dtype(test_series) or isinstance(test_series.dtype, pd.DatetimeTZDtype):
-                        date_cols.append(col)
-                        logger.info(f"Detected datetime column: {col}")
-                    # Also check if the values are actually dates (not just strings that look like dates)
-                    elif valid_count == len(df_visual):
-                        # Double check by verifying it's not just sequential numbers
-                        try:
-                            # If we can convert to datetime without errors, it's likely a date column
-                            sample_dates = test_series.dropna().head(10)
-                            if len(sample_dates) > 0:
-                                # Check if dates are in reasonable range
-                                min_date = sample_dates.min()
-                                max_date = sample_dates.max()
-                                if min_date.year >= 1900 and max_date.year <= 2100:
-                                    date_cols.append(col)
-                                    logger.info(f"Detected date column by validation: {col}")
-                        except:
-                            pass
-            except (ValueError, TypeError, pd.errors.OutOfBoundsDatetime):
-                # Column cannot be converted to datetime - skip it
+                # infer_datetime_format works across pandas 1.x and 2.x
+                try:
+                    test_series = pd.to_datetime(
+                        df_visual[col], errors='coerce', infer_datetime_format=True
+                    )
+                except TypeError:
+                    # pandas 2.2+ deprecated infer_datetime_format
+                    test_series = pd.to_datetime(df_visual[col], errors='coerce')
+
+                total_count = len(df_visual)
+                if total_count == 0:
+                    continue
+
+                valid_count = int(test_series.notna().sum())
+                valid_ratio = valid_count / total_count
+
+                # Accept column if at least 50 % of rows parsed successfully
+                if valid_ratio >= 0.5 and valid_count >= 5:
+                    valid_dates = test_series.dropna()
+                    try:
+                        min_date = valid_dates.min()
+                        max_date = valid_dates.max()
+                        if hasattr(min_date, 'year') and 1900 <= min_date.year and max_date.year <= 2100:
+                            date_cols.append(col)
+                            logger.info(
+                                f"Detected datetime column by parsing: '{col}' "
+                                f"({valid_ratio:.0%} valid, {min_date.date()} → {max_date.date()})"
+                            )
+                    except Exception:
+                        pass
+            except Exception as dt_err:
+                logger.debug(f"Column '{col}' not parseable as datetime: {dt_err}")
                 continue
         
-        eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
-        
-        # Get all numeric columns and filter out non-sensible ones (including primary keys)
+
         all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
-        
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+
         if not date_cols:
             result = {
                 "type": "timeseries",
@@ -1627,6 +1641,371 @@ async def get_timeseries_analysis(dataset_id: str):
         logger.error(f"Time series analysis error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Error generating time series analysis: {str(e)}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TIME SERIES FORECAST  (linear trend + exponential smoothing extrapolation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/analyze/{dataset_id}/forecast")
+async def get_forecast_analysis(dataset_id: str):
+    """
+    Simple time series forecasting: fits a linear trend + centred moving average
+    on each date×numeric pair and extrapolates 10 future periods.
+    Works entirely offline — no extra ML library required.
+    """
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "forecast" in cache:
+        return cache["forecast"]
+    try:
+        df = datasets[dataset_id]["df"]
+        primary_keys = datasets[dataset_id].get("primary_keys", [])
+        df_visual = downsample_ordered(df, MAX_EDA_SAMPLE_ROWS)
+
+        # ── Detect datetime columns (same logic as timeseries endpoint) ──────
+        date_cols: List[str] = []
+        for col in df_visual.columns:
+            if pd.api.types.is_datetime64_any_dtype(df_visual[col]):
+                date_cols.append(col)
+                continue
+            if pd.api.types.is_numeric_dtype(df_visual[col]):
+                continue
+            try:
+                try:
+                    ts = pd.to_datetime(df_visual[col], errors='coerce', infer_datetime_format=True)
+                except TypeError:
+                    ts = pd.to_datetime(df_visual[col], errors='coerce')
+                vr = ts.notna().sum() / max(1, len(df_visual))
+                if vr >= 0.5 and ts.notna().sum() >= 5:
+                    vd = ts.dropna()
+                    if hasattr(vd.min(), 'year') and 1900 <= vd.min().year and vd.max().year <= 2100:
+                        date_cols.append(col)
+            except Exception:
+                continue
+
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+
+        if not date_cols or not numeric_cols:
+            result = {"type": "forecast", "error": "No time series data detected",
+                      "visualizations": [], "forecasts": {}}
+            cache["forecast"] = result
+            return result
+
+        visualizations: List[dict] = []
+        forecasts: Dict[str, Any] = {}
+
+        for date_col in date_cols[:1]:   # use first datetime column
+            for num_col in numeric_cols[:3]:   # forecast up to 3 metrics
+                try:
+                    ts_df = df_visual[[date_col, num_col]].copy()
+                    ts_df[date_col] = pd.to_datetime(ts_df[date_col], errors='coerce')
+                    ts_df[num_col] = pd.to_numeric(ts_df[num_col], errors='coerce')
+                    ts_df = ts_df.dropna().sort_values(date_col).reset_index(drop=True)
+
+                    if len(ts_df) < 10:
+                        continue
+
+                    # ── Aggregate to monthly to reduce noise ─────────────────
+                    ts_df.set_index(date_col, inplace=True)
+                    monthly = ts_df[num_col].resample('ME').mean().dropna()
+                    if len(monthly) < 6:
+                        monthly = ts_df[num_col].resample('W').mean().dropna()
+                    if len(monthly) < 4:
+                        continue
+
+                    x = np.arange(len(monthly))
+                    y = monthly.values.astype(float)
+
+                    # ── Fit linear trend ─────────────────────────────────────
+                    slope, intercept = np.polyfit(x, y, 1)
+
+                    # ── Exponential smoothing (alpha = 0.3) ───────────────────
+                    alpha = 0.3
+                    smoothed = np.zeros(len(y))
+                    smoothed[0] = y[0]
+                    for i in range(1, len(y)):
+                        smoothed[i] = alpha * y[i] + (1 - alpha) * smoothed[i - 1]
+
+                    # ── Extrapolate 10 future periods ─────────────────────────
+                    n_future = 10
+                    freq = monthly.index.freq or pd.tseries.frequencies.to_offset('ME')
+                    last_date = monthly.index[-1]
+                    future_dates = pd.date_range(start=last_date, periods=n_future + 1, freq=freq)[1:]
+                    future_x = np.arange(len(monthly), len(monthly) + n_future)
+                    trend_forecast = slope * future_x + intercept
+                    last_smoothed = smoothed[-1]
+                    exp_forecast = np.zeros(n_future)
+                    prev = last_smoothed
+                    for i in range(n_future):
+                        trend_val = trend_forecast[i]
+                        prev = alpha * trend_val + (1 - alpha) * prev
+                        exp_forecast[i] = prev
+
+                    # ── Confidence interval (±1 std of historical residuals) ──
+                    hist_residuals = y - (slope * x + intercept)
+                    ci = float(np.std(hist_residuals))
+
+                    # ── Plotly figure ─────────────────────────────────────────
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=monthly.index.strftime('%Y-%m-%d').tolist(),
+                        y=y.tolist(),
+                        mode='lines+markers',
+                        name='Historical',
+                        line=dict(color='rgb(102,126,234)', width=2),
+                        marker=dict(size=4)
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=monthly.index.strftime('%Y-%m-%d').tolist(),
+                        y=smoothed.tolist(),
+                        mode='lines',
+                        name='Smoothed (α=0.3)',
+                        line=dict(color='rgb(255,193,7)', width=2, dash='dot')
+                    ))
+                    fd_str = future_dates.strftime('%Y-%m-%d').tolist()
+                    fig.add_trace(go.Scatter(
+                        x=fd_str + fd_str[::-1],
+                        y=(exp_forecast + ci).tolist() + (exp_forecast - ci).tolist()[::-1],
+                        fill='toself',
+                        fillcolor='rgba(255,100,100,0.15)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        name='Confidence Interval',
+                        showlegend=True
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=fd_str,
+                        y=exp_forecast.tolist(),
+                        mode='lines+markers',
+                        name='Forecast',
+                        line=dict(color='rgb(231,76,60)', width=2, dash='dash'),
+                        marker=dict(size=5, symbol='diamond')
+                    ))
+                    fig.update_layout(
+                        title=f"Forecast: {num_col} (next {n_future} periods)",
+                        xaxis_title=date_col,
+                        yaxis_title=num_col,
+                        template='plotly_dark',
+                        hovermode='x unified',
+                        height=500
+                    )
+
+                    uid = f"{date_col}_{num_col}"
+                    visualizations.append({
+                        "type": "forecast",
+                        "date_column": date_col,
+                        "value_column": num_col,
+                        "figure": convert_plotly_figure_to_dict(fig),
+                        "unique_id": uid
+                    })
+                    forecasts[uid] = {
+                        "date_column": date_col,
+                        "value_column": num_col,
+                        "periods_forecast": n_future,
+                        "last_historical_value": round(float(y[-1]), 4),
+                        "forecast_end_value": round(float(exp_forecast[-1]), 4),
+                        "trend_direction": "upward" if slope > 0 else "downward",
+                        "slope_per_period": round(float(slope), 6),
+                        "confidence_interval": round(ci, 4),
+                        "method": "Exponential Smoothing + Linear Trend (α=0.3)"
+                    }
+
+                except Exception as fc_err:
+                    logger.warning(f"Forecast skipped {date_col}×{num_col}: {fc_err}")
+                    continue
+
+        result = {
+            "type": "forecast",
+            "date_columns": date_cols,
+            "numeric_columns": numeric_cols,
+            "visualizations": visualizations,
+            "forecasts": forecasts,
+            "method": "Exponential Smoothing with Linear Trend Extrapolation"
+        }
+        cache["forecast"] = result
+        return result
+
+    except Exception as e:
+        logger.error(f"Forecast error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Forecast analysis failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ANOMALY DETECTION  (IQR + Z-score + Isolation Forest)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/analyze/{dataset_id}/anomaly")
+async def get_anomaly_detection(dataset_id: str):
+    """
+    Multi-method anomaly detection:
+    ① Per-column IQR fences  ② Per-column Z-score (|z|>3)
+    ③ Multi-variate Isolation Forest on all sensible numeric columns
+    Returns anomaly scores, row-level flags, and interactive scatter plots.
+    """
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "anomaly" in cache:
+        return cache["anomaly"]
+    try:
+        from sklearn.ensemble import IsolationForest
+        from sklearn.preprocessing import StandardScaler as _Scaler
+        from sklearn.impute import SimpleImputer as _Imputer
+
+        df = datasets[dataset_id]["df"]
+        df_visual = datasets[dataset_id].get("df_sample", df)
+        primary_keys = datasets[dataset_id].get("primary_keys", [])
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+
+        if not numeric_cols:
+            result = {"type": "anomaly", "error": "No numeric columns for anomaly detection",
+                      "visualizations": [], "summary": {}}
+            cache["anomaly"] = result
+            return result
+
+        visualizations: List[dict] = []
+        column_results: Dict[str, Any] = {}
+
+        # ── Per-column univariate anomaly ─────────────────────────────────────
+        for col in numeric_cols[:8]:
+            try:
+                series = pd.to_numeric(df_visual[col], errors='coerce').dropna()
+                if len(series) < 10:
+                    continue
+
+                q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
+                iqr = q3 - q1
+                lb, ub = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                iqr_mask = (series < lb) | (series > ub)
+
+                mean_v, std_v = float(series.mean()), float(series.std())
+                z_mask = (np.abs((series - mean_v) / std_v) > 3) if std_v > 0 else pd.Series([False] * len(series))
+
+                combined_mask = iqr_mask | z_mask
+                anomaly_vals = series[combined_mask]
+
+                column_results[col] = {
+                    "iqr_anomalies": int(iqr_mask.sum()),
+                    "zscore_anomalies": int(z_mask.sum()),
+                    "combined_anomalies": int(combined_mask.sum()),
+                    "anomaly_rate_pct": round(combined_mask.sum() / len(series) * 100, 2),
+                    "iqr_bounds": {"lower": round(lb, 4), "upper": round(ub, 4)},
+                    "sample_anomaly_values": sorted(anomaly_vals.tolist())[:10]
+                }
+
+                # Scatter plot with anomalies highlighted
+                normal_idx = series[~combined_mask].index.tolist()
+                anomaly_idx = series[combined_mask].index.tolist()
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(series[~combined_mask]))),
+                    y=series[~combined_mask].tolist(),
+                    mode='markers', name='Normal',
+                    marker=dict(color='rgb(102,126,234)', size=4, opacity=0.6),
+                    hovertemplate='Value: %{y}<extra>Normal</extra>'
+                ))
+                if len(anomaly_vals) > 0:
+                    fig.add_trace(go.Scatter(
+                        x=list(range(len(anomaly_vals))),
+                        y=anomaly_vals.tolist(),
+                        mode='markers', name='Anomaly',
+                        marker=dict(color='rgb(231,76,60)', size=9, symbol='x',
+                                    line=dict(width=2, color='red')),
+                        hovertemplate='Anomaly Value: %{y}<extra></extra>'
+                    ))
+                fig.add_hline(y=ub, line_dash='dash', line_color='orange',
+                              annotation_text=f'IQR Upper: {ub:.2f}')
+                fig.add_hline(y=lb, line_dash='dash', line_color='orange',
+                              annotation_text=f'IQR Lower: {lb:.2f}')
+                fig.update_layout(
+                    title=f"{col} — Anomaly Detection ({int(combined_mask.sum())} anomalies)",
+                    yaxis_title=col, xaxis_title='Row Index',
+                    template='plotly_dark', height=420
+                )
+                visualizations.append({"type": "anomaly_scatter", "column": col,
+                                        "figure": convert_plotly_figure_to_dict(fig)})
+            except Exception as col_err:
+                logger.warning(f"Anomaly univariate skipped {col}: {col_err}")
+
+        # ── Multi-variate Isolation Forest ────────────────────────────────────
+        iso_result: Dict[str, Any] = {}
+        try:
+            mv_cols = numeric_cols[:10]
+            X_mv = df_visual[mv_cols].copy()
+            imputer = _Imputer(strategy='median')
+            scaler = _Scaler()
+            X_imp = imputer.fit_transform(X_mv)
+            X_sc = scaler.fit_transform(X_imp)
+
+            n_contam = min(0.05, max(0.01, 0.05))  # 5% contamination assumption
+            iso = IsolationForest(n_estimators=50, contamination=n_contam,
+                                  random_state=42, n_jobs=-1)
+            preds = iso.fit_predict(X_sc)          # -1 = anomaly, 1 = normal
+            scores = iso.decision_function(X_sc)   # more negative = more anomalous
+
+            anomaly_mask = preds == -1
+            iso_result = {
+                "columns_used": mv_cols,
+                "total_anomalies": int(anomaly_mask.sum()),
+                "anomaly_rate_pct": round(float(anomaly_mask.mean()) * 100, 2),
+                "avg_anomaly_score": round(float(scores[anomaly_mask].mean()), 4) if anomaly_mask.any() else None
+            }
+
+            # 2-D scatter of first 2 numeric cols, coloured by isolation score
+            if len(mv_cols) >= 2:
+                c1, c2 = mv_cols[0], mv_cols[1]
+                fig_iso = go.Figure()
+                normal_df = df_visual[[c1, c2]].copy()
+                normal_df[c1] = pd.to_numeric(normal_df[c1], errors='coerce')
+                normal_df[c2] = pd.to_numeric(normal_df[c2], errors='coerce')
+                fig_iso.add_trace(go.Scatter(
+                    x=normal_df[~anomaly_mask][c1].tolist(),
+                    y=normal_df[~anomaly_mask][c2].tolist(),
+                    mode='markers', name='Normal',
+                    marker=dict(color='rgb(102,126,234)', size=5, opacity=0.5),
+                    hovertemplate=f'{c1}: %{{x}}<br>{c2}: %{{y}}<extra>Normal</extra>'
+                ))
+                fig_iso.add_trace(go.Scatter(
+                    x=normal_df[anomaly_mask][c1].tolist(),
+                    y=normal_df[anomaly_mask][c2].tolist(),
+                    mode='markers', name='Anomaly (Isolation Forest)',
+                    marker=dict(color='rgb(231,76,60)', size=9, symbol='x',
+                                line=dict(width=2, color='red')),
+                    hovertemplate=f'{c1}: %{{x}}<br>{c2}: %{{y}}<extra>Anomaly</extra>'
+                ))
+                fig_iso.update_layout(
+                    title=f"Isolation Forest Anomalies: {c1} vs {c2}",
+                    xaxis_title=c1, yaxis_title=c2,
+                    template='plotly_dark', height=480
+                )
+                visualizations.append({"type": "isolation_forest",
+                                        "figure": convert_plotly_figure_to_dict(fig_iso)})
+        except Exception as iso_err:
+            logger.warning(f"Isolation Forest failed: {iso_err}")
+            iso_result = {"error": str(iso_err)}
+
+        result = {
+            "type": "anomaly",
+            "numeric_columns": numeric_cols,
+            "column_results": column_results,
+            "isolation_forest": iso_result,
+            "visualizations": visualizations,
+            "summary": {
+                "columns_analyzed": len(column_results),
+                "total_univariate_anomalies": sum(
+                    v.get("combined_anomalies", 0) for v in column_results.values()
+                ),
+                "multivariate_anomalies": iso_result.get("total_anomalies", 0)
+            }
+        }
+        cache["anomaly"] = result
+        return result
+
+    except Exception as e:
+        logger.error(f"Anomaly detection error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Anomaly detection failed: {str(e)}")
+
+
 @app.get("/api/analyze/{dataset_id}/contour")
 async def get_contour_analysis(dataset_id: str):
     """Get contour box plots for numeric column pairs"""
@@ -1638,13 +2017,11 @@ async def get_contour_analysis(dataset_id: str):
     try:
         df = datasets[dataset_id]["df"]
         df_visual = datasets[dataset_id].get("df_sample", df)
-        eda = eda_results.get(dataset_id, {})
         primary_keys = datasets[dataset_id].get("primary_keys", [])
-        
-        # Get all numeric columns and filter out non-sensible ones (including primary keys)
+
         all_numeric_cols = [col for col in df_visual.columns if is_numeric_column(df_visual, col)]
-        numeric_cols = [col for col in all_numeric_cols if is_sensible_numeric_column(df_visual, col, eda, primary_keys)]
-        
+        numeric_cols = _get_sensible_numeric_cols(df_visual, datasets[dataset_id])
+
         if len(numeric_cols) < 2:
             result = {
                 "type": "contour",
@@ -1821,24 +2198,101 @@ async def explore_dataset(request: ExploreRequest):
         logger.error(f"Explore error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Data exploration failed: {str(e)}")
 
+def _build_insights_metadata(df: pd.DataFrame, eda: dict) -> str:
+    """
+    Build a compact, token-efficient metadata string from EDA for AI insights.
+    Strips histogram bins, raw value-count lists, and other bulky arrays so the
+    LLM prompt stays small and fast while still containing all useful statistics.
+    """
+    lines = []
+    lines.append(f"Rows: {eda.get('num_rows', len(df)):,}  Columns: {eda.get('num_columns', len(df.columns))}")
+
+    total_cells = len(df) * len(df.columns)
+    total_missing = int(df.isna().sum().sum())
+    dup_rows = int(df.duplicated().sum())
+    lines.append(f"Missing cells: {total_missing} ({round(total_missing/max(1,total_cells)*100,1)}%)  Duplicate rows: {dup_rows}")
+
+    cols_meta = []
+    for col, info in eda.get("columns", {}).items():
+        dtype = info.get("dtype", "?")
+        miss_pct = info.get("missing_percent", 0)
+        entry = f"  {col} [{dtype}] missing={miss_pct}%"
+
+        num_stats = info.get("numeric_stats")
+        if num_stats:
+            entry += (
+                f"  mean={num_stats.get('mean')}  std={num_stats.get('std')}"
+                f"  min={num_stats.get('min')}  max={num_stats.get('max')}"
+                f"  skew={info.get('skewness')}  outliers={info.get('outlier_count', 0)}"
+            )
+        else:
+            # Categorical – show top-5 values only
+            vc = info.get("value_counts") or info.get("top_values") or {}
+            if isinstance(vc, dict):
+                top = list(vc.items())[:5]
+            elif isinstance(vc, list):
+                top = [(v.get("value", v), v.get("count", "")) for v in vc[:5]]
+            else:
+                top = []
+            unique = info.get("unique_count", info.get("n_unique", "?"))
+            entry += f"  unique={unique}  top={top}"
+
+        cols_meta.append(entry)
+
+    lines.append("Columns:")
+    lines.extend(cols_meta)
+    return "\n".join(lines)
+
+
+def _build_compact_columns_context(df: pd.DataFrame, eda: dict, max_cols: int = 25) -> str:
+    """Compact schema summary to keep LLM prompts under free-tier token limits."""
+    lines = [f"Rows: {len(df):,}, Columns: {len(df.columns)}"]
+    columns_meta = eda.get("columns", {}) if isinstance(eda, dict) else {}
+
+    shown_cols = list(df.columns)[:max_cols]
+    for col in shown_cols:
+        info = columns_meta.get(col, {}) if isinstance(columns_meta, dict) else {}
+        dtype = info.get("dtype", str(df[col].dtype))
+        miss = info.get("missing_percent", round(float(df[col].isna().mean() * 100), 2))
+        unique = info.get("unique_count", int(df[col].nunique(dropna=True)))
+        line = f"- {col} [{dtype}] missing={miss}% unique={unique}"
+
+        num_stats = info.get("numeric_stats") if isinstance(info, dict) else None
+        if isinstance(num_stats, dict):
+            line += f" mean={num_stats.get('mean')} min={num_stats.get('min')} max={num_stats.get('max')}"
+
+        lines.append(line)
+
+    hidden = len(df.columns) - len(shown_cols)
+    if hidden > 0:
+        lines.append(f"- ... {hidden} additional columns omitted for brevity")
+
+    return "\n".join(lines)
+
+
 @app.get("/api/insights/{dataset_id}")
 async def generate_insights(dataset_id: str):
     """Generate AI insights"""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
-    
+
+    # Return cached result if already generated for this dataset
+    cache = datasets[dataset_id].setdefault("analysis_cache", {})
+    if "ai_insights" in cache:
+        return cache["ai_insights"]
+
     try:
         df = datasets[dataset_id]["df"]
         eda = eda_results[dataset_id]
         filename = datasets[dataset_id]["filename"]
-        
+
+        # Use compact metadata instead of full EDA JSON to keep the prompt small
+        meta = _build_insights_metadata(df, eda)
+
         prompt = f"""Analyze this dataset and provide insights in a structured format.
 
 Dataset: {filename}
-Rows: {len(df):,}, Columns: {len(df.columns)}
-
-EDA Summary:
-{json.dumps(eda, indent=2)}
+{meta}
 
 Provide insights in this EXACT format:
 
@@ -1863,15 +2317,19 @@ SECTION: Recommendations
 - Recommendation 2
 
 Keep each point concise and actionable."""
-        
-        raw_insights = get_gemini_response(prompt, "flash")
+
+        raw_insights = get_gemini_api_response(prompt)
+        if raw_insights.startswith("Error:"):
+            raise HTTPException(500, raw_insights)
+
         sections = parse_insights_into_sections(raw_insights)
-        
-        return {
-            "insights": sections,
-            "raw": raw_insights
-        }
-    
+        if not sections:
+            raise HTTPException(500, "Gemini returned an unexpected format for insights.")
+
+        result = {"insights": sections, "raw": raw_insights}
+        cache["ai_insights"] = result
+        return result
+
     except Exception as e:
         logger.error(f"Insights error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Insight generation failed: {str(e)}")
@@ -1959,9 +2417,16 @@ def compute_data_health_score(df: pd.DataFrame, primary_keys: list) -> dict:
 
 def _build_preprocessor(numeric_features, categorical_features):
     """Build sklearn ColumnTransformer for mixed feature sets."""
+    def _coerce_numeric_frame(X):
+        # Ensures mixed/object numeric-like columns are converted before median imputation.
+        if isinstance(X, pd.DataFrame):
+            return X.apply(pd.to_numeric, errors="coerce")
+        return pd.DataFrame(X).apply(pd.to_numeric, errors="coerce")
+
     transformers = []
     if numeric_features:
         transformers.append(("num", Pipeline([
+            ("to_numeric", FunctionTransformer(_coerce_numeric_frame, validate=False)),
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler())
         ]), numeric_features))
@@ -2075,25 +2540,27 @@ async def run_predictive_analysis(request: PredictRequest):
             if not can_stratify:
                 warnings_list.append("Stratified split not possible due to rare classes.")
 
+            # Limit n_estimators to 50 for fast turnaround; still competitive accuracy
             candidate_models = [
                 ("Logistic Regression",
-                 LogisticRegression(max_iter=500, n_jobs=-1, solver="saga",
+                 LogisticRegression(max_iter=300, n_jobs=-1, solver="saga",
                                     class_weight="balanced")),
                 ("Decision Tree",
-                 DecisionTreeClassifier(max_depth=10, class_weight="balanced", random_state=42)),
+                 DecisionTreeClassifier(max_depth=8, class_weight="balanced", random_state=42)),
                 ("Random Forest",
-                 RandomForestClassifier(n_estimators=150, n_jobs=-1, class_weight="balanced",
+                 RandomForestClassifier(n_estimators=50, n_jobs=-1, class_weight="balanced",
                                         max_features="sqrt", random_state=42)),
                 ("Gradient Boosting",
-                 GradientBoostingClassifier(n_estimators=80, learning_rate=0.1,
+                 GradientBoostingClassifier(n_estimators=50, learning_rate=0.1,
                                             max_depth=4, random_state=42)),
                 ("Extra Trees",
-                 ExtraTreesClassifier(n_estimators=150, n_jobs=-1, class_weight="balanced",
+                 ExtraTreesClassifier(n_estimators=50, n_jobs=-1, class_weight="balanced",
                                       random_state=42)),
                 ("K-Nearest Neighbors",
                  KNeighborsClassifier(n_neighbors=min(5, len(X_tr) // 10 or 1), n_jobs=-1)),
             ]
 
+            cv_folds = min(3, cv_folds)  # cap at 3 for speed
             cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42) if can_stratify \
                  else KFold(n_splits=cv_folds, shuffle=True, random_state=42)
 
@@ -2244,19 +2711,20 @@ async def run_predictive_analysis(request: PredictRequest):
                 raise HTTPException(400, "Not enough rows for regression analysis.")
 
             X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-            cv = KFold(n_splits=5, shuffle=True, random_state=42)
+            cv = KFold(n_splits=3, shuffle=True, random_state=42)  # 3 folds for speed
 
             warnings_list.append("Regression task detected (continuous target).")
             if len(y) < 200:
                 warnings_list.append("Small training sample — regression metrics may be unstable.")
 
+            # Limit n_estimators to 50 for fast turnaround
             candidate_reg = [
                 ("Ridge Regression", Ridge()),
-                ("Decision Tree", DecisionTreeRegressor(max_depth=10, random_state=42)),
-                ("Random Forest", RandomForestRegressor(n_estimators=150, n_jobs=-1, random_state=42)),
-                ("Gradient Boosting", GradientBoostingRegressor(n_estimators=80, learning_rate=0.1,
+                ("Decision Tree", DecisionTreeRegressor(max_depth=8, random_state=42)),
+                ("Random Forest", RandomForestRegressor(n_estimators=50, n_jobs=-1, random_state=42)),
+                ("Gradient Boosting", GradientBoostingRegressor(n_estimators=50, learning_rate=0.1,
                                                                  max_depth=4, random_state=42)),
-                ("Extra Trees", ExtraTreesRegressor(n_estimators=150, n_jobs=-1, random_state=42)),
+                ("Extra Trees", ExtraTreesRegressor(n_estimators=50, n_jobs=-1, random_state=42)),
             ]
 
             for name, reg_model in candidate_reg:
@@ -2393,112 +2861,392 @@ async def run_predictive_analysis(request: PredictRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _suggest_augmentations(stats: dict) -> list:
-    """Rule-based augmentation advisor for image datasets."""
+    """Rule-based augmentation advisor for tabular image dataset stats (ZIP uploads)."""
     suggestions = []
 
     total = stats.get("total_images", 0)
     n_classes = stats.get("num_classes", 1)
-    avg_per_class = total / max(1, n_classes)
     imbalance_ratio = stats.get("class_imbalance_ratio", 1.0)
+    avg_w = stats.get("avg_width", 224)
+    avg_h = stats.get("avg_height", 224)
+    is_grayscale = stats.get("is_predominantly_grayscale", False)
 
-    # Volume-based
-    if total < 500:
+    # ── Volume-based geometric augmentations ──────────────────────────────────
+    if total < 200:
         suggestions.append({
-            "technique": "Horizontal Flip",
-            "reason": "Very small dataset — doubles the effective training size cheaply.",
+            "technique": "Random Horizontal Flip",
+            "reason": f"Tiny dataset ({total} images) — flip instantly doubles effective training samples.",
             "priority": "High",
             "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
-        })
-        suggestions.append({
-            "technique": "Vertical Flip",
-            "reason": "Useful when object orientation varies (e.g., aerial/medical images).",
-            "priority": "Medium",
-            "code_hint": "transforms.RandomVerticalFlip(p=0.5)"
         })
         suggestions.append({
             "technique": "Random Rotation (±30°)",
-            "reason": "Improves rotational invariance for small datasets.",
+            "reason": "Small dataset benefits from strong geometric diversity — 30° rotation adds significant variance.",
             "priority": "High",
             "code_hint": "transforms.RandomRotation(degrees=30)"
         })
-    elif total < 2000:
         suggestions.append({
-            "technique": "Horizontal Flip",
-            "reason": "Standard augmentation for moderate-sized datasets.",
+            "technique": "Random Vertical Flip",
+            "reason": "For aerial/medical/microscopy images with <200 samples, vertical flip adds useful orientation variance.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomVerticalFlip(p=0.3)"
+        })
+        suggestions.append({
+            "technique": "Random Affine Transform",
+            "reason": f"Very few images ({total}) — affine shear/translate/scale combos maximise training diversity.",
+            "priority": "High",
+            "code_hint": "transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1))"
+        })
+    elif total < 1000:
+        suggestions.append({
+            "technique": "Random Horizontal Flip",
+            "reason": f"Moderate dataset ({total} images) — horizontal flip is the safest baseline augmentation.",
             "priority": "High",
             "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
         })
         suggestions.append({
-            "technique": "Random Rotation (±15°)",
-            "reason": "Adds rotational variance without distortion.",
+            "technique": "Random Rotation (±20°)",
+            "reason": "Adds rotational variance without excessive padding artefacts for medium-sized datasets.",
             "priority": "Medium",
-            "code_hint": "transforms.RandomRotation(degrees=15)"
+            "code_hint": "transforms.RandomRotation(degrees=20)"
+        })
+    elif total < 5000:
+        suggestions.append({
+            "technique": "Random Horizontal Flip",
+            "reason": "Standard baseline — effective at any dataset size.",
+            "priority": "High",
+            "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Random Rotation (±10°)",
+            "reason": "Light rotation is sufficient for datasets with adequate diversity (1k-5k images).",
+            "priority": "Low",
+            "code_hint": "transforms.RandomRotation(degrees=10)"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Horizontal Flip",
+            "reason": f"Large dataset ({total:,} images) — flip remains the standard baseline augmentation.",
+            "priority": "High",
+            "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
         })
 
-    # Class imbalance
-    if imbalance_ratio > 3.0:
+    # ── Class imbalance ───────────────────────────────────────────────────────
+    if imbalance_ratio > 5.0:
+        suggestions.append({
+            "technique": "Oversample Minority Classes (WeightedRandomSampler)",
+            "reason": f"Severe class imbalance ({imbalance_ratio:.1f}×). Weighted sampling ensures equal class exposure per epoch.",
+            "priority": "High",
+            "code_hint": "torch.utils.data.WeightedRandomSampler(weights, num_samples)"
+        })
+        suggestions.append({
+            "technique": "Aggressive Augmentation for Minority Classes",
+            "reason": f"Critical: {imbalance_ratio:.1f}× imbalance — apply stronger transforms only to minority-class images.",
+            "priority": "High",
+            "code_hint": "Apply transforms.Compose([...]) only in minority class dataset branches."
+        })
+    elif imbalance_ratio > 3.0:
         suggestions.append({
             "technique": "Oversampling via Augmentation",
-            "reason": f"Class imbalance ratio is {imbalance_ratio:.1f}x — augment minority classes more aggressively.",
+            "reason": f"Imbalance ratio {imbalance_ratio:.1f}× detected — augment minority classes more aggressively to balance.",
             "priority": "High",
-            "code_hint": "Use WeightedRandomSampler or apply extra transforms to minority classes."
+            "code_hint": "Use class_weight='balanced' or oversample with augmented copies."
         })
 
-    # Always suggest color jitter and normalize
-    suggestions.append({
-        "technique": "Color Jitter (brightness, contrast, saturation)",
-        "reason": "Improves generalization under different lighting/imaging conditions.",
-        "priority": "Medium",
-        "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3)"
-    })
-    suggestions.append({
-        "technique": "Random Crop / ResizedCrop",
-        "reason": "Forces the model to focus on different regions of the image.",
-        "priority": "Medium",
-        "code_hint": "transforms.RandomResizedCrop(224, scale=(0.8, 1.0))"
-    })
-    suggestions.append({
-        "technique": "Gaussian Blur / Noise",
-        "reason": "Simulates sensor noise and slight defocus.",
-        "priority": "Low",
-        "code_hint": "transforms.GaussianBlur(kernel_size=3)"
-    })
-    suggestions.append({
-        "technique": "Normalization (ImageNet stats)",
-        "reason": "Standardizes pixel distribution for faster convergence with pretrained models.",
-        "priority": "High",
-        "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"
-    })
-
-    # Domain-specific hints from stats
-    avg_w = stats.get("avg_width", 0)
-    avg_h = stats.get("avg_height", 0)
+    # ── Resolution / size ─────────────────────────────────────────────────────
     if avg_w > 512 or avg_h > 512:
         suggestions.append({
-            "technique": "Resize / Center Crop to 224×224 or 256×256",
-            "reason": f"Images are large ({avg_w:.0f}×{avg_h:.0f}px). Resize for efficiency.",
+            "technique": "Resize + Random Resized Crop to 224×224",
+            "reason": f"Images average {avg_w:.0f}×{avg_h:.0f}px — resize significantly reduces memory and training time.",
             "priority": "High",
-            "code_hint": "transforms.Resize(256), transforms.CenterCrop(224)"
+            "code_hint": "transforms.Resize(256), transforms.RandomResizedCrop(224, scale=(0.8,1.0))"
+        })
+    elif avg_w < 64 or avg_h < 64:
+        suggestions.append({
+            "technique": "Bicubic Upscale to ≥224×224",
+            "reason": f"Very small images ({avg_w:.0f}×{avg_h:.0f}px) — upscale before augmenting to avoid pixelation artefacts.",
+            "priority": "High",
+            "code_hint": "transforms.Resize((224,224), interpolation=transforms.InterpolationMode.BICUBIC)"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Resized Crop",
+            "reason": "Crops force the model to learn from different spatial regions within each image.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomResizedCrop(224, scale=(0.8, 1.0))"
         })
 
-    is_grayscale = stats.get("is_predominantly_grayscale", False)
+    # ── Colour / photometric ──────────────────────────────────────────────────
     if not is_grayscale:
         suggestions.append({
+            "technique": "Color Jitter (brightness, contrast, saturation)",
+            "reason": "Simulates varying lighting, exposure, and colour temperature across images.",
+            "priority": "Medium",
+            "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05)"
+        })
+        suggestions.append({
             "technique": "Random Grayscale",
-            "reason": "Forces the model to not rely solely on colour cues.",
+            "reason": "Prevents the CNN from relying solely on colour — improves texture-based learning.",
             "priority": "Low",
             "code_hint": "transforms.RandomGrayscale(p=0.1)"
         })
+        suggestions.append({
+            "technique": "Normalize (ImageNet statistics)",
+            "reason": "Standardizes inputs to match ImageNet pretrained weight distributions for fine-tuning.",
+            "priority": "High",
+            "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random AutoContrast",
+            "reason": "Grayscale dataset — autocontrast stretches histogram to improve feature visibility.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomAutocontrast(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Normalize (Grayscale)",
+            "reason": "Zero-centres grayscale pixel distribution for stable training.",
+            "priority": "High",
+            "code_hint": "transforms.Normalize(mean=[0.5], std=[0.5])"
+        })
 
-    # Deduplicate by technique name
+    # ── Noise / blur ──────────────────────────────────────────────────────────
+    suggestions.append({
+        "technique": "Gaussian Blur (random kernel)",
+        "reason": "Simulates lens defocus and sensor blur — important for models deployed in real environments.",
+        "priority": "Low",
+        "code_hint": "transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))"
+    })
+
+    # ── Deduplicate & sort ────────────────────────────────────────────────────
     seen = set()
     deduped = []
     for s in suggestions:
         if s["technique"] not in seen:
             seen.add(s["technique"])
             deduped.append(s)
+    priority_order = {"High": 0, "Medium": 1, "Low": 2}
+    deduped.sort(key=lambda x: priority_order.get(x["priority"], 3))
+    return deduped
 
-    # Sort by priority
+
+def _suggest_augmentations_for_single_image(image_stats: dict) -> list:
+    """
+    Generate content-aware augmentation suggestions from a single image's pixel statistics.
+    Every suggestion is driven by measurable properties of that specific image.
+    """
+    suggestions = []
+
+    w = image_stats.get("width", 224)
+    h = image_stats.get("height", 224)
+    is_gray = image_stats.get("is_grayscale", False)
+    aspect_ratio = image_stats.get("aspect_ratio", 1.0)
+    overall_mean = image_stats.get("overall_mean", 128.0)
+    overall_std = image_stats.get("overall_std", 50.0)
+    mean_r = image_stats.get("mean_red", overall_mean)
+    mean_g = image_stats.get("mean_green", overall_mean)
+    mean_b = image_stats.get("mean_blue", overall_mean)
+
+    # ── Geometric ─────────────────────────────────────────────────────────────
+    suggestions.append({
+        "technique": "Random Horizontal Flip",
+        "reason": "Universal baseline — doubles training samples with no distortion.",
+        "priority": "High",
+        "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"
+    })
+
+    # Vertical flip only when image is roughly square (not a portrait/landscape doc)
+    if 0.65 <= aspect_ratio <= 1.55:
+        suggestions.append({
+            "technique": "Random Vertical Flip",
+            "reason": f"Near-square aspect ratio ({aspect_ratio:.2f}) suggests aerial/medical/texture image — vertical flip is valid.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomVerticalFlip(p=0.3)"
+        })
+
+    # Rotation strength depends on aspect ratio
+    if 0.8 <= aspect_ratio <= 1.25:
+        suggestions.append({
+            "technique": "Random Rotation (±30°)",
+            "reason": f"Square image (ratio {aspect_ratio:.2f}) tolerates large rotation without padding waste.",
+            "priority": "High",
+            "code_hint": "transforms.RandomRotation(degrees=30)"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Rotation (±15°)",
+            "reason": f"Rectangular image (ratio {aspect_ratio:.2f}) — gentle rotation avoids padding artefacts at corners.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomRotation(degrees=15)"
+        })
+
+    # ── Resolution ────────────────────────────────────────────────────────────
+    if w < 64 or h < 64:
+        suggestions.append({
+            "technique": "Bicubic Upscale to 224×224",
+            "reason": f"Image is very small ({w}×{h}px) — upscale to a standard CNN input size before augmenting.",
+            "priority": "High",
+            "code_hint": "transforms.Resize((224,224), interpolation=transforms.InterpolationMode.BICUBIC)"
+        })
+    elif w > 512 or h > 512:
+        suggestions.append({
+            "technique": "Random Resized Crop (scale 0.7–1.0)",
+            "reason": f"Large image ({w}×{h}px) — random crops expose diverse regions and reduce compute cost.",
+            "priority": "High",
+            "code_hint": "transforms.RandomResizedCrop(224, scale=(0.7, 1.0))"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Crop with Padding",
+            "reason": f"Image ({w}×{h}px) is standard resolution — padding + crop adds spatial translation invariance.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomCrop(min(224, {min(w,h)}), padding=8)"
+        })
+
+    # ── Brightness ────────────────────────────────────────────────────────────
+    if overall_mean < 60:
+        suggestions.append({
+            "technique": "Brightness Boost Augmentation",
+            "reason": f"Image is very dark (mean pixel = {overall_mean:.0f}/255). Use a brightness range that includes brighter variants for training diversity.",
+            "priority": "High",
+            "code_hint": "transforms.ColorJitter(brightness=(0.8, 3.0))"
+        })
+    elif overall_mean < 100:
+        suggestions.append({
+            "technique": "Brightness Jitter (lean bright)",
+            "reason": f"Image is underexposed (mean = {overall_mean:.0f}/255) — bias augmentation toward brighter samples.",
+            "priority": "High",
+            "code_hint": "transforms.ColorJitter(brightness=(0.6, 2.0))"
+        })
+    elif overall_mean > 210:
+        suggestions.append({
+            "technique": "Brightness Jitter (lean dark)",
+            "reason": f"Image is overexposed (mean = {overall_mean:.0f}/255) — include darker augmentations to balance exposure range.",
+            "priority": "High",
+            "code_hint": "transforms.ColorJitter(brightness=(0.2, 0.9))"
+        })
+    elif overall_mean > 160:
+        suggestions.append({
+            "technique": "Brightness & Contrast Jitter",
+            "reason": f"Bright image (mean = {overall_mean:.0f}/255) — symmetric brightness and contrast variation covers exposure spectrum.",
+            "priority": "Medium",
+            "code_hint": "transforms.ColorJitter(brightness=0.4, contrast=0.4)"
+        })
+    else:
+        suggestions.append({
+            "technique": "Brightness & Contrast Jitter",
+            "reason": f"Well-exposed image (mean = {overall_mean:.0f}/255) — ±30% brightness/contrast variation is sufficient.",
+            "priority": "Medium",
+            "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.3)"
+        })
+
+    # ── Contrast ──────────────────────────────────────────────────────────────
+    if overall_std < 25:
+        suggestions.append({
+            "technique": "Contrast Enhancement (RandomAutocontrast)",
+            "reason": f"Very low pixel variance (std = {overall_std:.1f}) — the image is nearly flat. Strong contrast augmentation is critical.",
+            "priority": "High",
+            "code_hint": "transforms.RandomAutocontrast(p=0.7)"
+        })
+    elif overall_std < 50:
+        suggestions.append({
+            "technique": "Contrast Jitter",
+            "reason": f"Below-average contrast (std = {overall_std:.1f}) — boosting contrast range improves edge feature learning.",
+            "priority": "Medium",
+            "code_hint": "transforms.ColorJitter(contrast=(0.5, 2.0))"
+        })
+    elif overall_std > 90:
+        suggestions.append({
+            "technique": "Random Equalization",
+            "reason": f"Very high pixel variance (std = {overall_std:.1f}) — histogram equalization helps the model handle high-dynamic-range images.",
+            "priority": "Low",
+            "code_hint": "transforms.RandomEqualize(p=0.3)"
+        })
+
+    # ── Colour cast / saturation (colour images only) ─────────────────────────
+    if not is_gray:
+        channel_means = [mean_r, mean_g, mean_b]
+        channel_spread = max(channel_means) - min(channel_means)
+        dominant_idx = channel_means.index(max(channel_means))
+        dominant_name = ["Red", "Green", "Blue"][dominant_idx]
+
+        if channel_spread > 60:
+            suggestions.append({
+                "technique": "Hue & Saturation Jitter",
+                "reason": f"Strong {dominant_name} colour cast detected (R={mean_r:.0f} G={mean_g:.0f} B={mean_b:.0f}, spread={channel_spread:.0f}). Hue jitter prevents the model from depending on this specific cast.",
+                "priority": "High",
+                "code_hint": "transforms.ColorJitter(hue=0.25, saturation=0.5)"
+            })
+        elif channel_spread > 30:
+            suggestions.append({
+                "technique": "Saturation Jitter",
+                "reason": f"Mild {dominant_name} channel dominance (spread={channel_spread:.0f}) — saturation augmentation handles varying white-balance conditions.",
+                "priority": "Medium",
+                "code_hint": "transforms.ColorJitter(saturation=0.35, hue=0.1)"
+            })
+        else:
+            suggestions.append({
+                "technique": "Mild Saturation Jitter",
+                "reason": f"Balanced colour channels (R={mean_r:.0f} G={mean_g:.0f} B={mean_b:.0f}) — light saturation variation covers imaging sensor differences.",
+                "priority": "Low",
+                "code_hint": "transforms.ColorJitter(saturation=0.2)"
+            })
+
+        suggestions.append({
+            "technique": "Random Grayscale",
+            "reason": "Forces the model to learn from texture/shape rather than colour alone — essential for robustness.",
+            "priority": "Low",
+            "code_hint": "transforms.RandomGrayscale(p=0.1)"
+        })
+        suggestions.append({
+            "technique": "Normalize (ImageNet statistics)",
+            "reason": "Aligns pixel distribution with ImageNet pretrained weights — required for transfer learning.",
+            "priority": "High",
+            "code_hint": "transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Invert",
+            "reason": "Grayscale image — pixel inversion simulates negative/X-ray variants which commonly appear in medical/document datasets.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomInvert(p=0.2)"
+        })
+        suggestions.append({
+            "technique": "Random AutoContrast",
+            "reason": "Grayscale histogram stretching improves feature visibility across varying scan/lighting conditions.",
+            "priority": "Medium",
+            "code_hint": "transforms.RandomAutocontrast(p=0.5)"
+        })
+        suggestions.append({
+            "technique": "Normalize (Grayscale)",
+            "reason": "Standardizes pixel distribution to zero mean and unit variance for stable gradient flow.",
+            "priority": "High",
+            "code_hint": "transforms.Normalize(mean=[0.5], std=[0.5])"
+        })
+
+    # ── Noise / sharpness ─────────────────────────────────────────────────────
+    if overall_std < 40:
+        suggestions.append({
+            "technique": "Gaussian Blur + Random Noise",
+            "reason": f"Low texture variance (std = {overall_std:.1f}) — adding synthetic noise combats over-smoothed, homogeneous inputs.",
+            "priority": "Medium",
+            "code_hint": "transforms.GaussianBlur(kernel_size=3, sigma=(0.5, 2.0))"
+        })
+    else:
+        suggestions.append({
+            "technique": "Random Sharpness Adjustment",
+            "reason": f"Good texture detail (std = {overall_std:.1f}) — sharpness augmentation simulates varying camera focus.",
+            "priority": "Low",
+            "code_hint": "transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3)"
+        })
+
+    # ── Deduplicate & sort ────────────────────────────────────────────────────
+    seen = set()
+    deduped = []
+    for s in suggestions:
+        if s["technique"] not in seen:
+            seen.add(s["technique"])
+            deduped.append(s)
     priority_order = {"High": 0, "Medium": 1, "Low": 2}
     deduped.sort(key=lambda x: priority_order.get(x["priority"], 3))
     return deduped
@@ -2588,6 +3336,30 @@ async def upload_image_dataset(file: UploadFile = File(...)):
 
         augmentation_suggestions = _suggest_augmentations(stats)
 
+        # Extract base64 previews of up to 3 sample images so LLaVA can analyse them later
+        sample_b64_previews: List[Dict] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(contents)) as zf2:
+                collected = 0
+                for name in zf2.namelist():
+                    ext2 = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                    if ext2 not in image_extensions:
+                        continue
+                    try:
+                        with zf2.open(name) as img_file2:
+                            img2 = Image.open(img_file2)
+                            preview_b64 = _pil_to_base64(img2.convert("RGB"))
+                            parts2 = [p for p in name.replace("\\", "/").split("/") if p]
+                            label2 = parts2[-2] + "/" + parts2[-1] if len(parts2) >= 2 else name
+                            sample_b64_previews.append({"label": label2, "b64": preview_b64})
+                            collected += 1
+                            if collected >= 3:
+                                break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         # Generate AI augmentation commentary
         ai_commentary = ""
         try:
@@ -2619,7 +3391,8 @@ Focus on practical recommendations. No markdown, no bullet points. Plain text on
             "dataset_type": "image",
             "image_stats": stats,
             "augmentation_suggestions": augmentation_suggestions,
-            "ai_augmentation_commentary": ai_commentary
+            "ai_augmentation_commentary": ai_commentary,
+            "sample_b64_previews": sample_b64_previews,
         }
         eda_results[dataset_id] = {"columns": {}, "dataset_type": "image"}
 
@@ -2641,11 +3414,12 @@ Focus on practical recommendations. No markdown, no bullet points. Plain text on
 
 @app.get("/api/augmentation/{dataset_id}")
 async def get_augmentation_suggestions(dataset_id: str):
-    """Return augmentation suggestions for an image dataset."""
+    """Return augmentation suggestions for an image dataset (ZIP, single, or multi)."""
     if dataset_id not in datasets:
         raise HTTPException(404, "Dataset not found")
     ds = datasets[dataset_id]
-    if ds.get("dataset_type") != "image":
+    ds_type = ds.get("dataset_type", "")
+    if ds_type not in ("image", "single_image", "multi_image"):
         raise HTTPException(400, "This endpoint is for image datasets only.")
     return {
         "dataset_id": dataset_id,
@@ -2720,20 +3494,21 @@ async def chat_with_ai(request: ChatRequest):
             for msg in request.history[-5:]:
                 history_context += f"User: {msg.get('user', '')}\nAI: {msg.get('ai', '')}\n"
         
-        # Get sample data for context
-        sample_data = df.head(5).to_dict('records')
-        # Convert Timestamps and other non-JSON-serializable objects to strings
+        # Keep sample payload compact to reduce Gemini token usage
+        sample_cols = list(df.columns)[:12]
+        sample_data = df[sample_cols].head(3).to_dict('records')
         sample_data = convert_to_json_serializable(sample_data)
+        compact_schema = _build_compact_columns_context(df, eda, max_cols=25)
         
         prompt = f"""You are a data analyst assistant. Answer questions about the dataset conversationally and accurately.
 
 Dataset: {filename}
 Rows: {len(df):,}, Columns: {len(df.columns)}
 
-Column Information:
-{json.dumps(convert_to_json_serializable(eda.get('columns', {})), indent=2)}
+Column Information (compact):
+{compact_schema}
 
-Sample Data (first 5 rows):
+Sample Data (first 3 rows, max 12 columns):
 {json.dumps(sample_data, indent=2)}
 {history_context}
 
@@ -2741,7 +3516,9 @@ User Question: {request.message}
 
 Provide a clear, helpful, and accurate answer based on the dataset information above. If making calculations or observations, be specific and cite numbers from the data."""
         
-        response = get_gemini_response(prompt, "flash")
+        response = get_gemini_api_response(prompt)
+        if response.startswith("Error:"):
+            raise HTTPException(500, response)
         
         return {
             "response": response,
@@ -2762,11 +3539,15 @@ async def query_dataset(request: QueryRequest):
         df = datasets[request.dataset_id]["df"]
         eda = eda_results[request.dataset_id]
         
+        # Build compact schema context to avoid token-heavy requests
+        compact_schema = _build_compact_columns_context(df, eda, max_cols=30)
+
         # Generate pandas query using AI
         prompt = f"""Convert this natural language query into pandas operations.
 
 Dataset Columns: {list(df.columns)}
-Column Info: {json.dumps(convert_to_json_serializable(eda.get('columns', {})), indent=2)}
+    Column Info (compact):
+    {compact_schema}
 
 Query: {request.query}
 
@@ -2780,7 +3561,9 @@ Example formats:
 
 Only return the code, nothing else."""
         
-        pandas_code = get_gemini_response(prompt, "flash").strip()
+        pandas_code = get_gemini_api_response(prompt).strip()
+        if pandas_code.startswith("Error:"):
+            raise HTTPException(500, pandas_code)
         
         # Clean up the code
         pandas_code = pandas_code.replace('```python', '').replace('```', '').strip()
@@ -2889,6 +3672,1456 @@ async def get_column_details(dataset_id: str, column_name: str):
     except Exception as e:
         logger.error(f"Column details error: {str(e)}", exc_info=True)
         raise HTTPException(500, f"Failed to get column details: {str(e)}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SINGLE IMAGE UPLOAD  (analyze and show augmentation previews)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pil_to_base64(img: "Image.Image", fmt: str = "PNG") -> str:
+    buf = io.BytesIO()
+    img.save(buf, format=fmt)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
+
+
+def _apply_augmentations_to_pil(img: "Image.Image") -> List[Dict[str, str]]:
+    """Apply common augmentations to a PIL image and return base64 previews."""
+    import random
+
+    previews = []
+
+    # Resize to max 300px for preview
+    MAX_PREVIEW = 300
+    w, h = img.size
+    if max(w, h) > MAX_PREVIEW:
+        scale = MAX_PREVIEW / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    # Ensure RGB for display (in case RGBA or P)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    # 1 – Original
+    previews.append({"name": "Original", "b64": _pil_to_base64(img)})
+
+    # 2 – Horizontal Flip
+    previews.append({"name": "Horizontal Flip", "b64": _pil_to_base64(img.transpose(Image.FLIP_LEFT_RIGHT))})
+
+    # 3 – Vertical Flip
+    previews.append({"name": "Vertical Flip", "b64": _pil_to_base64(img.transpose(Image.FLIP_TOP_BOTTOM))})
+
+    # 4 – Rotation 30°
+    previews.append({"name": "Rotation 30°", "b64": _pil_to_base64(img.rotate(30, expand=False, fillcolor=0))})
+
+    # 5 – Rotation -30°
+    previews.append({"name": "Rotation -30°", "b64": _pil_to_base64(img.rotate(-30, expand=False, fillcolor=0))})
+
+    # 6 – Brightness boost (+70)
+    try:
+        from PIL import ImageEnhance
+        b_img = ImageEnhance.Brightness(img).enhance(1.6)
+        previews.append({"name": "Brightness Boost", "b64": _pil_to_base64(b_img)})
+    except Exception:
+        pass
+
+    # 7 – Contrast boost
+    try:
+        from PIL import ImageEnhance
+        c_img = ImageEnhance.Contrast(img).enhance(1.8)
+        previews.append({"name": "Contrast Boost", "b64": _pil_to_base64(c_img)})
+    except Exception:
+        pass
+
+    # 8 – Saturation boost (color jitter)
+    try:
+        from PIL import ImageEnhance
+        s_img = ImageEnhance.Color(img).enhance(2.0)
+        previews.append({"name": "Saturation Boost", "b64": _pil_to_base64(s_img)})
+    except Exception:
+        pass
+
+    # 9 – Grayscale
+    previews.append({"name": "Grayscale", "b64": _pil_to_base64(img.convert("L").convert("RGB"))})
+
+    # 10 – Center Crop (80%)
+    if img.width > 30 and img.height > 30:
+        cw, ch = int(img.width * 0.8), int(img.height * 0.8)
+        left = (img.width - cw) // 2
+        top = (img.height - ch) // 2
+        cropped = img.crop((left, top, left + cw, top + ch))
+        previews.append({"name": "Center Crop 80%", "b64": _pil_to_base64(cropped)})
+
+    # 11 – Gaussian Blur
+    try:
+        from PIL import ImageFilter
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=2))
+        previews.append({"name": "Gaussian Blur", "b64": _pil_to_base64(blurred)})
+    except Exception:
+        pass
+
+    # 12 – Sharpness boost
+    try:
+        from PIL import ImageEnhance
+        sharp = ImageEnhance.Sharpness(img).enhance(3.0)
+        previews.append({"name": "Sharpness Boost", "b64": _pil_to_base64(sharp)})
+    except Exception:
+        pass
+
+    return previews
+
+
+def _analyze_single_image(img: "Image.Image") -> Dict[str, Any]:
+    """Return basic stats for a PIL image."""
+    w, h = img.size
+    mode = img.mode
+    channels = len(img.getbands())
+
+    stats: Dict[str, Any] = {
+        "width": w,
+        "height": h,
+        "aspect_ratio": round(w / max(1, h), 3),
+        "mode": mode,
+        "channels": channels,
+        "is_grayscale": mode in ("L", "LA", "1"),
+        "total_pixels": w * h,
+    }
+
+    # Per-channel mean/std
+    try:
+        arr = np.array(img.convert("RGB"), dtype=np.float32)
+        for i, ch_name in enumerate(["Red", "Green", "Blue"]):
+            stats[f"mean_{ch_name.lower()}"] = round(float(np.mean(arr[:, :, i])), 2)
+            stats[f"std_{ch_name.lower()}"] = round(float(np.std(arr[:, :, i])), 2)
+        stats["overall_mean"] = round(float(np.mean(arr)), 2)
+        stats["overall_std"] = round(float(np.std(arr)), 2)
+    except Exception:
+        pass
+
+    return stats
+
+
+@app.post("/api/upload-single-image")
+async def upload_single_image(file: UploadFile = File(...)):
+    """
+    Upload a single image.
+    Returns: dataset_id, image stats, augmentation previews (base64), and AI suggestions.
+    """
+    allowed_types = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif"}
+    ext = "." + (file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "")
+    if ext not in allowed_types:
+        raise HTTPException(400, f"Unsupported image format: {ext}. Use JPG, PNG, BMP, TIFF, WEBP.")
+
+    try:
+        contents = await file.read()
+        img = Image.open(io.BytesIO(contents))
+
+        # Analyse image
+        image_stats = _analyze_single_image(img)
+
+        # Build augmentation previews
+        previews = _apply_augmentations_to_pil(img)
+
+        # Build augmentation suggestions based on actual pixel content
+        augmentation_suggestions = _suggest_augmentations_for_single_image(image_stats)
+
+        # AI commentary
+        ai_commentary = ""
+        try:
+            ai_prompt = f"""You are a computer vision expert. Analyze this single image and suggest data augmentation techniques.
+
+Image: {file.filename}
+Dimensions: {image_stats['width']}x{image_stats['height']}px
+Color mode: {image_stats['mode']} ({image_stats['channels']} channel(s))
+Grayscale: {image_stats.get('is_grayscale', False)}
+Pixel mean (R/G/B): {image_stats.get('mean_red', '?')}/{image_stats.get('mean_green', '?')}/{image_stats.get('mean_blue', '?')}
+Pixel std (R/G/B): {image_stats.get('std_red', '?')}/{image_stats.get('std_green', '?')}/{image_stats.get('std_blue', '?')}
+
+Give 3-4 concise sentences: what kind of image this appears to be (medical, natural scene, document, satellite, etc.) and which augmentations would be most valuable for ML training. No markdown. Plain text only."""
+            ai_commentary = get_gemini_response(ai_prompt, "lite")
+        except Exception:
+            ai_commentary = "AI commentary unavailable."
+
+        # Store in datasets
+        dataset_id = str(uuid.uuid4())
+        datasets[dataset_id] = {
+            "df": pd.DataFrame(),
+            "df_sample": pd.DataFrame(),
+            "filename": file.filename,
+            "uploaded_at": datetime.now().isoformat(),
+            "primary_keys": [],
+            "is_sampled": False,
+            "profile": {},
+            "analysis_cache": {},
+            "dataset_type": "single_image",
+            "image_stats": image_stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "augmentation_previews": previews,
+            "ai_augmentation_commentary": ai_commentary,
+        }
+        eda_results[dataset_id] = {"columns": {}, "dataset_type": "single_image"}
+
+        return {
+            "dataset_id": dataset_id,
+            "filename": file.filename,
+            "dataset_type": "single_image",
+            "stats": image_stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "augmentation_previews": previews,
+            "ai_commentary": ai_commentary,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Single image upload error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Single image upload failed: {str(e)}")
+
+
+@app.get("/api/image-analysis/{dataset_id}")
+async def get_single_image_analysis(dataset_id: str):
+    """Return full image analysis including previews for a single-image or multi-image dataset."""
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    ds = datasets[dataset_id]
+    if ds.get("dataset_type") not in ("single_image", "multi_image"):
+        raise HTTPException(400, "This endpoint is for single/multi-image datasets only.")
+    return {
+        "dataset_id": dataset_id,
+        "filename": ds["filename"],
+        "dataset_type": ds.get("dataset_type", "single_image"),
+        "stats": ds.get("image_stats", {}),
+        "augmentation_suggestions": ds.get("augmentation_suggestions", []),
+        "augmentation_previews": ds.get("augmentation_previews", []),
+        "ai_commentary": ds.get("ai_augmentation_commentary", ""),
+    }
+
+
+def _parse_insight_sections(raw_text: str) -> list:
+    """Parse 'SECTION: title / - bullet' formatted text into structured sections."""
+    sections = []
+    current_title = None
+    current_items: List[str] = []
+
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.upper().startswith("SECTION:"):
+            if current_title and current_items:
+                sections.append({"title": current_title, "items": current_items})
+            current_title = line[8:].strip().strip("*").strip()
+            current_items = []
+        elif line.startswith("- ") or line.startswith("• ") or line.startswith("* "):
+            current_items.append(line[2:].strip())
+        elif re.match(r'^\d+\.\s', line):
+            current_items.append(re.sub(r'^\d+\.\s*', '', line).strip())
+
+    if current_title and current_items:
+        sections.append({"title": current_title, "items": current_items})
+
+    # Fallback: wrap everything in a single section
+    if not sections and raw_text.strip():
+        items = [l.strip("- •*").strip() for l in raw_text.splitlines()
+                 if l.strip() and l.strip() not in ["-", "*", "•"]]
+        if items:
+            sections = [{"title": "AI Analysis", "items": items[:8]}]
+
+    return sections
+
+
+def _get_domain_specific_augmentations(domain: str, stats: dict) -> list:
+    """Return only the augmentations relevant to the detected visual domain (max 6)."""
+    total     = stats.get("total_images", 0)
+    imbalance = stats.get("class_imbalance_ratio", 1.0)
+    avg_w     = stats.get("avg_width", 224)
+    avg_h     = stats.get("avg_height", 224)
+    is_gray   = stats.get("is_predominantly_grayscale", False)
+
+    norm_std  = "transforms.Normalize(mean=[0.5], std=[0.5])" if is_gray else \
+                "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"
+
+    domain_strategies: Dict[str, list] = {
+        "medical_imaging": [
+            {"technique": "Random Rotation (±15°)", "reason": "Medical images may appear at slight angles; small rotation adds robustness.", "priority": "High", "code_hint": "transforms.RandomRotation(degrees=15)"},
+            {"technique": "Elastic Deformation", "reason": "Simulates tissue deformation — critical for robust medical segmentation.", "priority": "High", "code_hint": "from torchvision.transforms import ElasticTransform; ElasticTransform(alpha=50.0)"},
+            {"technique": "Random Contrast Enhancement", "reason": "Medical scans often have poor contrast — augmenting it improves model robustness.", "priority": "High", "code_hint": "transforms.RandomAutocontrast(p=0.5)"},
+            {"technique": "Normalize", "reason": "Required for stable training. Using grayscale stats." if is_gray else "Required for pretrained backbone fine-tuning.", "priority": "High", "code_hint": norm_std},
+            {"technique": "Skip Color Jitter", "reason": "Color is diagnostically meaningful in medical images — DO NOT apply color jitter.", "priority": "High", "code_hint": "# Omit ColorJitter for medical datasets"},
+        ],
+        "satellite_aerial": [
+            {"technique": "Random H+V Flip", "reason": "Aerial imagery has no canonical orientation — both flips are equally valid.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5), transforms.RandomVerticalFlip(p=0.5)"},
+            {"technique": "Random Rotation (90° steps)", "reason": "Satellite imagery is rotation-invariant — 90° steps avoid padding artifacts.", "priority": "High", "code_hint": "transforms.RandomRotation(degrees=[0,90,180,270])"},
+            {"technique": "Random Resized Crop (0.5–1.0)", "reason": "Forces the model to detect features at multiple spatial scales.", "priority": "High", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.5, 1.0))"},
+            {"technique": "Light Color Jitter", "reason": "Accounts for atmospheric haze and seasonal color variation.", "priority": "Medium", "code_hint": "transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1)"},
+            {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for ResNet/EfficientNet fine-tuning.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "natural_scenes": [
+            {"technique": "Random Horizontal Flip", "reason": "Natural scenes are horizontally symmetric — safe and highly effective.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+            {"technique": "Color Jitter (medium)", "reason": "Natural lighting varies widely — simulate dawn, dusk, and overcast conditions.", "priority": "High", "code_hint": "transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1)"},
+            {"technique": "Random Resized Crop (0.6–1.0)", "reason": "Encourage scale-invariant feature learning across scene regions.", "priority": "High", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.6, 1.0))"},
+            {"technique": "Normalize (ImageNet)", "reason": "Match distribution of pretrained models for fine-tuning.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "faces_portraits": [
+            {"technique": "Random Horizontal Flip", "reason": "Faces are bilaterally symmetric — horizontal flip is safe.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+            {"technique": "Light Color Jitter", "reason": "Simulates different lighting and camera exposure across skin tones.", "priority": "Medium", "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.2, saturation=0.2)"},
+            {"technique": "Random Resized Crop (0.85–1.0)", "reason": "Ensures face features are centered; robust to slight misalignment.", "priority": "High", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.85, 1.0))"},
+            {"technique": "Skip Vertical Flip", "reason": "Vertical flip of faces creates unnatural images that harm learning.", "priority": "High", "code_hint": "# Omit RandomVerticalFlip for face datasets"},
+            {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for FaceNet/ResNet/EfficientNet.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "documents": [
+            {"technique": "Random Rotation (±5°)", "reason": "Document scans may be slightly skewed — small rotation adds robustness.", "priority": "High", "code_hint": "transforms.RandomRotation(degrees=5)"},
+            {"technique": "Random Perspective", "reason": "Simulates perspective distortion from scanning at an angle.", "priority": "Medium", "code_hint": "transforms.RandomPerspective(distortion_scale=0.2, p=0.3)"},
+            {"technique": "Random Grayscale", "reason": "Documents appear in color or grayscale scans — improve cross-modality generalization.", "priority": "Medium", "code_hint": "transforms.RandomGrayscale(p=0.3)"},
+            {"technique": "Skip Color Jitter", "reason": "Text/document color is semantically meaningful — avoid color distortion.", "priority": "High", "code_hint": "# Omit ColorJitter for document datasets"},
+            {"technique": "Normalize (Standard)", "reason": "Required for stable training with pretrained models.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "industrial": [
+            {"technique": "Random Rotation (full 360°)", "reason": "Industrial parts can appear at any orientation on inspection lines.", "priority": "High", "code_hint": "transforms.RandomRotation(degrees=360)"},
+            {"technique": "Random Erasing (simulate defects)", "reason": "Randomly erase patches to simulate occlusion and partial defect visibility.", "priority": "High", "code_hint": "transforms.RandomErasing(p=0.3, scale=(0.02, 0.1))"},
+            {"technique": "Gaussian Blur", "reason": "Simulates camera defocus and motion blur in industrial inspection setups.", "priority": "Medium", "code_hint": "transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))"},
+            {"technique": "Normalize (Standard)", "reason": "Required for pretrained backbone fine-tuning.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "food_beverage": [
+            {"technique": "Random Horizontal Flip", "reason": "Food images have no canonical orientation.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+            {"technique": "Color Jitter (medium-high)", "reason": "Lighting strongly affects food appearance — simulate restaurant vs. natural light.", "priority": "High", "code_hint": "transforms.ColorJitter(brightness=0.4, contrast=0.3, saturation=0.4, hue=0.05)"},
+            {"technique": "Random Rotation (±30°)", "reason": "Food photos are captured at varied angles.", "priority": "Medium", "code_hint": "transforms.RandomRotation(degrees=30)"},
+            {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for pretrained food classification models.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "animals_wildlife": [
+            {"technique": "Random Horizontal Flip", "reason": "Animals can face either direction — horizontal flip is safe and effective.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+            {"technique": "Color Jitter (medium)", "reason": "Simulates varying lighting in wildlife photography.", "priority": "High", "code_hint": "transforms.ColorJitter(brightness=0.4, contrast=0.3, saturation=0.3)"},
+            {"technique": "Random Resized Crop (0.5–1.0)", "reason": "Animals appear at various scales — force scale-invariant learning.", "priority": "High", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.5, 1.0))"},
+            {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for fine-tuning on nature/wildlife datasets.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+        "objects_products": [
+            {"technique": "Random Horizontal Flip", "reason": "Product images have no fixed orientation.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+            {"technique": "Color Jitter (light)", "reason": "Simulates varying e-commerce lighting and white balance.", "priority": "Medium", "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.2, saturation=0.2)"},
+            {"technique": "Random Resized Crop", "reason": "Products appear at various scales; crop encourages scale robustness.", "priority": "High", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.7, 1.0))"},
+            {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for pretrained product classifiers.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+        ],
+    }
+
+    domain_key = domain.lower().replace(" ", "_").replace("-", "_")
+    base = domain_strategies.get(domain_key, [
+        {"technique": "Random Horizontal Flip", "reason": "Standard baseline — doubles samples with no distortion.", "priority": "High", "code_hint": "transforms.RandomHorizontalFlip(p=0.5)"},
+        {"technique": "Color Jitter", "reason": "Simulates varying lighting conditions.", "priority": "Medium", "code_hint": "transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2)"},
+        {"technique": "Random Resized Crop", "reason": "Forces scale-invariant feature learning.", "priority": "Medium", "code_hint": "transforms.RandomResizedCrop(224, scale=(0.7, 1.0))"},
+        {"technique": "Normalize (ImageNet)", "reason": "Standard normalization for pretrained models.", "priority": "High", "code_hint": "transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])"},
+    ])
+
+    extra: list = []
+    if imbalance > 3.0:
+        extra.append({"technique": "WeightedRandomSampler", "reason": f"Class imbalance {imbalance:.1f}× — weighted sampling ensures balanced class exposure per epoch.", "priority": "High", "code_hint": "torch.utils.data.WeightedRandomSampler(weights, num_samples=len(dataset))"})
+    if total < 500:
+        extra.append({"technique": "MixUp / CutMix", "reason": f"Only {total} images — MixUp/CutMix create powerful synthetic training samples.", "priority": "High", "code_hint": "# torchvision.transforms.v2.MixUp() or CutMix()"})
+    if avg_w > 512 or avg_h > 512:
+        extra.append({"technique": f"Resize to 224×224", "reason": f"Images are {avg_w:.0f}×{avg_h:.0f}px — resize reduces memory and speeds up training.", "priority": "High", "code_hint": "transforms.Resize((224, 224))"})
+
+    seen = {e["technique"] for e in extra}
+    combined = extra + [s for s in base if s["technique"] not in seen]
+    priority_order = {"High": 0, "Medium": 1, "Low": 2}
+    combined.sort(key=lambda x: priority_order.get(x["priority"], 3))
+    return combined[:6]
+
+
+@app.get("/api/image-ai-insights/{dataset_id}")
+async def get_image_ai_insights(dataset_id: str):
+    """
+    Use LLaVA to analyse up to 2 representative sample images, detect visual domain,
+    and return structured insights (same section format as the CSV insights tab) plus
+    domain-specific augmentation recommendations.  Only 1 LLaVA call per image.
+    """
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    ds = datasets[dataset_id]
+    ds_type = ds.get("dataset_type", "")
+    if ds_type not in ("image", "single_image", "multi_image"):
+        raise HTTPException(400, "This endpoint is for image datasets only.")
+
+    cache = ds.setdefault("analysis_cache", {})
+    if "image_ai_insights" in cache:
+        return cache["image_ai_insights"]
+
+    # ── Collect up to 2 sample images ──────────────────────────────────────
+    previews = ds.get("augmentation_previews", [])
+    sample_images_b64: List[Dict] = []
+
+    if ds_type == "single_image":
+        orig = next((p for p in previews if p.get("name") == "Original"), None)
+        if orig:
+            sample_images_b64.append({"label": ds.get("filename", "image"), "b64": orig["b64"]})
+    elif ds_type == "multi_image":
+        for batch in previews[:2]:
+            orig = next((p for p in batch.get("previews", []) if p.get("name") == "Original"), None)
+            if orig:
+                sample_images_b64.append({"label": batch.get("filename", "image"), "b64": orig["b64"]})
+    elif ds_type == "image":
+        for item in ds.get("sample_b64_previews", [])[:2]:
+            sample_images_b64.append(item)
+
+    if not sample_images_b64:
+        return {
+            "dataset_id": dataset_id,
+            "domain": "unknown",
+            "overall_description": "No sample images available for vision analysis.",
+            "insights": [],
+            "augmentation_tips": [],
+        }
+
+    # ── Single combined LLaVA call per image ───────────────────────────────
+    all_domains: List[str] = []
+    all_scenes:  List[str] = []
+    all_visuals: List[str] = []
+
+    for item in sample_images_b64:
+        b64 = item.get("b64", "")
+        if not b64:
+            continue
+        prompt = (
+            "Analyze this image. Respond on exactly 3 lines:\n"
+            "DOMAIN: [one of: medical_imaging, satellite_aerial, natural_scenes, documents, "
+            "industrial, food_beverage, fashion_apparel, sports_action, faces_portraits, "
+            "animals_wildlife, objects_products, microscopy, art_drawings, other]\n"
+            "SCENE: [what is in this image — 1 to 2 sentences]\n"
+            "VISUAL: [lighting, color profile, texture complexity — 1 sentence]\n"
+            "Respond ONLY in that 3-line format, no extra text."
+        )
+        response = get_ollama_vision_response(prompt, b64)
+        dm = re.search(r'DOMAIN:\s*(.+)',  response, re.IGNORECASE)
+        sc = re.search(r'SCENE:\s*(.+)',   response, re.IGNORECASE)
+        vi = re.search(r'VISUAL:\s*(.+)',  response, re.IGNORECASE)
+        if dm: all_domains.append(dm.group(1).strip().lower().replace(" ", "_").split(",")[0])
+        if sc: all_scenes.append(sc.group(1).strip())
+        if vi: all_visuals.append(vi.group(1).strip())
+
+    dominant_domain = max(set(all_domains), key=all_domains.count) if all_domains else "other"
+    combined_scene  = " ".join(all_scenes)
+    combined_visual = " ".join(all_visuals)
+
+    # ── Structured insights via text model ─────────────────────────────────
+    img_stats   = ds.get("image_stats", {})
+    class_dist  = img_stats.get("class_distribution", {})
+    total_imgs  = img_stats.get("total_images", len(sample_images_b64))
+    n_classes   = len(class_dist) or 1
+    imbalance   = img_stats.get("class_imbalance_ratio", 1.0)
+    avg_w       = img_stats.get("avg_width", "?")
+    avg_h       = img_stats.get("avg_height", "?")
+    color_mode  = "grayscale" if img_stats.get("is_predominantly_grayscale") else "color"
+    classes_str = str(list(class_dist.keys())[:8])
+
+    insight_prompt = (
+        f"You are a computer vision data scientist analyzing a dataset.\n"
+        f"Dataset facts: {total_imgs} images, {n_classes} class(es) {classes_str}, "
+        f"visual domain: {dominant_domain.replace('_', ' ')}, "
+        f"avg size {avg_w}x{avg_h}px, {color_mode}, imbalance ratio {imbalance:.1f}x.\n"
+        f"Image content: {combined_scene}\n"
+        f"Visual characteristics: {combined_visual}\n\n"
+        f"Generate exactly 4 insight sections using this format:\n"
+        f"SECTION: <title>\n"
+        f"- <bullet point 1>\n"
+        f"- <bullet point 2>\n"
+        f"- <bullet point 3>\n\n"
+        f"Use these exact section titles:\n"
+        f"1. Dataset Overview\n"
+        f"2. Visual Characteristics\n"
+        f"3. CV Task Recommendations\n"
+        f"4. Preprocessing Recommendations\n\n"
+        f"Each section: 3 bullet points, specific to this dataset's domain and stats. No extra text."
+    )
+    raw_insights = get_gemini_response(insight_prompt)
+    insights = _parse_insight_sections(raw_insights)
+
+    # ── Domain-specific augmentation tips ──────────────────────────────────
+    aug_tips = _get_domain_specific_augmentations(dominant_domain, img_stats)
+
+    result = {
+        "dataset_id": dataset_id,
+        "domain": dominant_domain,
+        "overall_description": combined_scene,
+        "insights": insights,
+        "augmentation_tips": aug_tips,
+    }
+    cache["image_ai_insights"] = result
+    return result
+
+
+@app.post("/api/upload-multiple-images")
+async def upload_multiple_images(files: List[UploadFile] = File(...)):
+    """
+    Upload multiple image files at once (no ZIP needed).
+    File naming convention for class labels:  classname_anything.ext  OR  classname/anything.ext
+    Returns: dataset_id, per-image stats, augmentation previews (up to 3 images), and suggestions.
+    """
+    allowed_types = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".gif"}
+    if not files:
+        raise HTTPException(400, "No files uploaded.")
+
+    valid_files = []
+    for f in files:
+        ext = "." + (f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else "")
+        if ext in allowed_types:
+            valid_files.append((f, ext))
+
+    if not valid_files:
+        raise HTTPException(400, "No valid image files found. Supported: JPG, PNG, BMP, TIFF, WEBP.")
+
+    try:
+        widths, heights, channels_list, means_all, stds_all = [], [], [], [], []
+        grayscale_count = 0
+        class_counts: Dict[str, int] = {}
+        per_image_stats = []
+        all_previews = []  # previews from first 3 images
+        combined_image_stats: Dict[str, Any] = {}
+
+        for idx, (upload_file, ext) in enumerate(valid_files):
+            contents = await upload_file.read()
+            try:
+                img = Image.open(io.BytesIO(contents))
+                stats_i = _analyze_single_image(img)
+
+                widths.append(stats_i["width"])
+                heights.append(stats_i["height"])
+                channels_list.append(stats_i["channels"])
+                if stats_i.get("is_grayscale"):
+                    grayscale_count += 1
+                if "overall_mean" in stats_i:
+                    means_all.append(stats_i["overall_mean"])
+                if "overall_std" in stats_i:
+                    stds_all.append(stats_i["overall_std"])
+
+                # Infer class label from filename prefix (e.g. "cat_001.jpg" → "cat")
+                basename = upload_file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                name_without_ext = basename.rsplit(".", 1)[0]
+                parts = [p for p in name_without_ext.replace("-", "_").split("_") if p]
+                class_label = parts[0].lower() if parts else "unknown"
+                class_counts[class_label] = class_counts.get(class_label, 0) + 1
+
+                per_image_stats.append({
+                    "filename": upload_file.filename,
+                    "class_label": class_label,
+                    **stats_i
+                })
+
+                # Collect previews for first 3 valid images
+                if idx < 3:
+                    previews_i = _apply_augmentations_to_pil(img)
+                    all_previews.append({
+                        "filename": upload_file.filename,
+                        "previews": previews_i
+                    })
+
+            except Exception as img_err:
+                logger.warning(f"Could not process {upload_file.filename}: {img_err}")
+                continue
+
+        if not widths:
+            raise HTTPException(400, "No valid images could be opened.")
+
+        total = len(widths)
+        counts = list(class_counts.values())
+        imbalance = round(max(counts) / max(1, min(counts)), 2) if len(counts) > 1 else 1.0
+        is_gray_dominant = grayscale_count > total * 0.7
+
+        avg_mean = round(float(np.mean(means_all)), 2) if means_all else 128.0
+        avg_std = round(float(np.mean(stds_all)), 2) if stds_all else 50.0
+
+        # Build aggregated image stats
+        combined_image_stats = {
+            "total_images": total,
+            "num_classes": len(class_counts),
+            "class_distribution": class_counts,
+            "class_imbalance_ratio": imbalance,
+            "avg_width": round(float(np.mean(widths)), 1),
+            "avg_height": round(float(np.mean(heights)), 1),
+            "min_width": int(min(widths)),
+            "max_width": int(max(widths)),
+            "min_height": int(min(heights)),
+            "max_height": int(max(heights)),
+            "is_predominantly_grayscale": is_gray_dominant,
+            "overall_mean": avg_mean,
+            "overall_std": avg_std,
+            "width": int(np.mean(widths)),
+            "height": int(np.mean(heights)),
+            "aspect_ratio": round(float(np.mean(widths)) / max(1.0, float(np.mean(heights))), 3),
+            "is_grayscale": is_gray_dominant,
+            "channels": int(round(float(np.mean(channels_list)))),
+            "mode": "L" if is_gray_dominant else "RGB",
+        }
+
+        # Use content-aware suggestions if single-image-like; dataset-level if batch
+        if total == 1 and per_image_stats:
+            augmentation_suggestions = _suggest_augmentations_for_single_image(per_image_stats[0])
+        else:
+            # Use average pixel stats to drive content-aware suggestions
+            proxy_stats = {**combined_image_stats}
+            augmentation_suggestions = _suggest_augmentations_for_single_image(proxy_stats)
+
+        # AI commentary
+        ai_commentary = ""
+        try:
+            class_str = ", ".join(f"{k}: {v}" for k, v in list(class_counts.items())[:10])
+            ai_prompt = f"""You are a computer vision expert. Analyse this batch of {total} uploaded images and give 3-4 concise sentences on the best augmentation strategy for ML training.
+
+Images: {total} files
+Inferred classes: {class_str}
+Avg dimensions: {combined_image_stats['avg_width']:.0f}×{combined_image_stats['avg_height']:.0f}px
+Grayscale dominant: {is_gray_dominant}
+Mean brightness: {avg_mean:.1f}/255  |  Pixel std: {avg_std:.1f}
+Class imbalance: {imbalance:.1f}×
+
+No markdown. Plain text only."""
+            ai_commentary = get_gemini_response(ai_prompt, "lite")
+        except Exception:
+            ai_commentary = "AI commentary unavailable."
+
+        dataset_id = str(uuid.uuid4())
+        datasets[dataset_id] = {
+            "df": pd.DataFrame(),
+            "df_sample": pd.DataFrame(),
+            "filename": f"{total} images uploaded",
+            "uploaded_at": datetime.now().isoformat(),
+            "primary_keys": [],
+            "is_sampled": False,
+            "profile": {},
+            "analysis_cache": {},
+            "dataset_type": "multi_image",
+            "image_stats": combined_image_stats,
+            "per_image_stats": per_image_stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "augmentation_previews": all_previews,
+            "ai_augmentation_commentary": ai_commentary,
+        }
+        eda_results[dataset_id] = {"columns": {}, "dataset_type": "multi_image"}
+
+        return {
+            "dataset_id": dataset_id,
+            "filename": f"{total} images uploaded",
+            "dataset_type": "multi_image",
+            "total_images": total,
+            "stats": combined_image_stats,
+            "augmentation_suggestions": augmentation_suggestions,
+            "augmentation_previews": all_previews,
+            "ai_commentary": ai_commentary,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Multi-image upload error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"Multi-image upload failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ML MODEL RECOMMENDATIONS  (tabular datasets)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ML_CATALOG = {
+    "classification": {
+        "small": [
+            {
+                "name": "Logistic Regression",
+                "description": "Probabilistic linear classifier, fast and interpretable.",
+                "pros": ["Very fast to train", "Interpretable coefficients", "Works well for linearly separable data", "Returns calibrated probabilities"],
+                "cons": ["Assumes linear decision boundary", "Needs feature scaling", "Struggles with complex interactions"],
+                "best_for": "Binary/multi-class classification with numeric features, baseline model",
+                "sklearn": "sklearn.linear_model.LogisticRegression",
+                "complexity": "Low",
+                "eval_metrics": ["Accuracy", "F1 Score", "ROC-AUC", "Log Loss"],
+            },
+            {
+                "name": "Decision Tree",
+                "description": "Splits data hierarchically on best features.",
+                "pros": ["Highly interpretable", "No scaling required", "Handles mixed feature types", "Fast inference"],
+                "cons": ["Prone to overfitting", "Unstable — small data changes alter tree", "Poor generalisation on deep trees"],
+                "best_for": "Rule extraction, explainability use-cases",
+                "sklearn": "sklearn.tree.DecisionTreeClassifier",
+                "complexity": "Low",
+                "eval_metrics": ["Accuracy", "F1 Score", "Confusion Matrix"],
+            },
+            {
+                "name": "K-Nearest Neighbors",
+                "description": "Classifies based on majority vote of k nearest training points.",
+                "pros": ["Simple, no training phase", "Naturally multi-class", "Adapts to complex boundaries"],
+                "cons": ["Slow at inference for large datasets", "Sensitive to irrelevant features", "Requires feature scaling"],
+                "best_for": "Small datasets with well-defined local structure",
+                "sklearn": "sklearn.neighbors.KNeighborsClassifier",
+                "complexity": "Low",
+                "eval_metrics": ["Accuracy", "F1 Score"],
+            },
+        ],
+        "medium": [
+            {
+                "name": "Random Forest",
+                "description": "Ensemble of decision trees with bagging and random feature selection.",
+                "pros": ["Robust to overfitting", "Handles missing values", "Built-in feature importance", "Works on mixed data types"],
+                "cons": ["Less interpretable than single tree", "Memory-intensive for large forests", "Slower than linear models"],
+                "best_for": "General-purpose classification, mixed numeric/categorical data",
+                "sklearn": "sklearn.ensemble.RandomForestClassifier",
+                "complexity": "Medium",
+                "eval_metrics": ["Accuracy", "F1 Score (macro)", "ROC-AUC", "Feature Importance"],
+            },
+            {
+                "name": "Gradient Boosting (XGBoost-style)",
+                "description": "Sequential ensemble that corrects residual errors from previous trees.",
+                "pros": ["State-of-the-art on tabular data", "Handles missing values natively", "Regularisation built-in", "Feature importance"],
+                "cons": ["Many hyperparameters to tune", "Slower to train than Random Forest", "Can overfit on small datasets"],
+                "best_for": "Competitive accuracy on structured/tabular datasets",
+                "sklearn": "sklearn.ensemble.GradientBoostingClassifier",
+                "complexity": "High",
+                "eval_metrics": ["Accuracy", "F1 Score", "ROC-AUC", "Log Loss"],
+            },
+            {
+                "name": "Support Vector Machine (SVM)",
+                "description": "Finds maximum-margin hyperplane separating classes.",
+                "pros": ["Effective in high-dimensional space", "Kernel trick for non-linear boundaries", "Memory efficient"],
+                "cons": ["Does not scale to large datasets", "Feature scaling required", "Slow prediction for large kernels"],
+                "best_for": "Text/image features, medium datasets, high-dimensional spaces",
+                "sklearn": "sklearn.svm.SVC",
+                "complexity": "Medium",
+                "eval_metrics": ["Accuracy", "F1 Score", "Confusion Matrix"],
+            },
+        ],
+        "large": [
+            {
+                "name": "LightGBM / XGBoost",
+                "description": "Highly optimised gradient boosting libraries for large-scale data.",
+                "pros": ["Fastest among boosting methods", "Scales to millions of rows", "Categorical feature support (LightGBM)", "Top-ranked on Kaggle"],
+                "cons": ["Complex hyperparameter tuning", "Less interpretable than trees", "Can overfit without regularisation"],
+                "best_for": "Large tabular datasets where accuracy is critical",
+                "sklearn": "lightgbm.LGBMClassifier or xgboost.XGBClassifier",
+                "complexity": "High",
+                "eval_metrics": ["Accuracy", "F1 Score", "ROC-AUC", "Log Loss"],
+            },
+            {
+                "name": "Neural Network (MLP)",
+                "description": "Multi-layer perceptron with non-linear activation functions.",
+                "pros": ["Can learn complex patterns", "Flexible architecture", "Works with any feature type after encoding"],
+                "cons": ["Requires large amounts of data", "Black-box predictions", "Sensitive to scaling and initialisation"],
+                "best_for": "Large datasets with complex feature interactions",
+                "sklearn": "sklearn.neural_network.MLPClassifier",
+                "complexity": "High",
+                "eval_metrics": ["Accuracy", "F1 Score", "Loss Curve"],
+            },
+            {
+                "name": "Extra Trees",
+                "description": "More randomised variant of Random Forest — faster training.",
+                "pros": ["Faster than Random Forest", "Low variance due to full randomisation", "Good on noisy data"],
+                "cons": ["Slightly lower accuracy than Random Forest on clean data", "Less common in production"],
+                "best_for": "Large noisy datasets where speed matters",
+                "sklearn": "sklearn.ensemble.ExtraTreesClassifier",
+                "complexity": "Medium",
+                "eval_metrics": ["Accuracy", "F1 Score", "Feature Importance"],
+            },
+        ],
+    },
+    "regression": {
+        "small": [
+            {
+                "name": "Ridge / Lasso Regression",
+                "description": "Regularised linear regression (L2/L1 penalty).",
+                "pros": ["Fast training", "Interpretable", "Handles multicollinearity (Ridge)", "Feature selection (Lasso)"],
+                "cons": ["Assumes linear relationships", "Requires feature scaling", "Poor on non-linear data"],
+                "best_for": "Continuous targets with linear relationships, baseline model",
+                "sklearn": "sklearn.linear_model.Ridge / Lasso",
+                "complexity": "Low",
+                "eval_metrics": ["R² Score", "RMSE", "MAE", "MAPE"],
+            },
+            {
+                "name": "Decision Tree Regressor",
+                "description": "Splits data into regions and predicts mean value in each region.",
+                "pros": ["No scaling required", "Handles non-linearity", "Interpretable"],
+                "cons": ["Overfits easily", "High variance", "Poor extrapolation"],
+                "best_for": "Non-linear regression with interpretability requirement",
+                "sklearn": "sklearn.tree.DecisionTreeRegressor",
+                "complexity": "Low",
+                "eval_metrics": ["R² Score", "RMSE", "MAE"],
+            },
+            {
+                "name": "K-Nearest Neighbors Regressor",
+                "description": "Predicts target as average of k nearest training points.",
+                "pros": ["Non-parametric", "Captures local patterns", "No training phase"],
+                "cons": ["Slow inference on large data", "Sensitive to scale", "Affected by irrelevant features"],
+                "best_for": "Small, locally structured regression problems",
+                "sklearn": "sklearn.neighbors.KNeighborsRegressor",
+                "complexity": "Low",
+                "eval_metrics": ["R² Score", "RMSE"],
+            },
+        ],
+        "medium": [
+            {
+                "name": "Random Forest Regressor",
+                "description": "Ensemble of decision trees averaging predictions.",
+                "pros": ["Robust to outliers", "Handles mixed types", "Feature importance built-in", "Low variance"],
+                "cons": ["Memory intensive", "Slower than linear models", "Black-box predictions"],
+                "best_for": "General-purpose regression, mixed datasets",
+                "sklearn": "sklearn.ensemble.RandomForestRegressor",
+                "complexity": "Medium",
+                "eval_metrics": ["R² Score", "RMSE", "MAE", "Feature Importance"],
+            },
+            {
+                "name": "Gradient Boosting Regressor",
+                "description": "Sequential ensemble minimising regression residuals.",
+                "pros": ["State-of-the-art accuracy on tabular data", "Built-in regularisation", "Handles outliers"],
+                "cons": ["Hyperparameter tuning needed", "Risk of overfitting", "Slower training"],
+                "best_for": "Maximum accuracy on structured data, Kaggle-style problems",
+                "sklearn": "sklearn.ensemble.GradientBoostingRegressor",
+                "complexity": "High",
+                "eval_metrics": ["R² Score", "RMSE", "MAE"],
+            },
+            {
+                "name": "Support Vector Regressor (SVR)",
+                "description": "Regression equivalent of SVM — fits an ε-tube around predictions.",
+                "pros": ["Works in high dimensions", "Kernel trick for non-linearity", "Robust to outliers with ε-insensitive loss"],
+                "cons": ["Does not scale to large datasets", "Slow training", "Requires feature scaling"],
+                "best_for": "Medium datasets, non-linear targets in moderate dimensions",
+                "sklearn": "sklearn.svm.SVR",
+                "complexity": "Medium",
+                "eval_metrics": ["R² Score", "RMSE", "MAE"],
+            },
+        ],
+        "large": [
+            {
+                "name": "LightGBM / XGBoost Regressor",
+                "description": "Optimised gradient boosting for large-scale regression.",
+                "pros": ["Handles millions of rows efficiently", "Categorical support", "Best-in-class accuracy", "GPU support"],
+                "cons": ["Complex tuning", "Less interpretable", "Risk of over-engineering"],
+                "best_for": "Large-scale tabular regression where accuracy is critical",
+                "sklearn": "lightgbm.LGBMRegressor or xgboost.XGBRegressor",
+                "complexity": "High",
+                "eval_metrics": ["R² Score", "RMSE", "MAE", "MAPE"],
+            },
+            {
+                "name": "Neural Network Regressor (MLP)",
+                "description": "Deep learning-style multi-layer perceptron for regression.",
+                "pros": ["Can learn very complex patterns", "Scales with data", "Feature extraction automatic"],
+                "cons": ["Requires lots of data", "Needs careful tuning", "Computationally expensive"],
+                "best_for": "Large datasets with complex non-linear relationships",
+                "sklearn": "sklearn.neural_network.MLPRegressor",
+                "complexity": "High",
+                "eval_metrics": ["R² Score", "RMSE", "MAE", "Loss Curve"],
+            },
+            {
+                "name": "Extra Trees Regressor",
+                "description": "More randomised variant of Random Forest for regression.",
+                "pros": ["Faster than Random Forest", "Less overfitting", "Handles large feature sets"],
+                "cons": ["Slightly lower accuracy", "Higher bias"],
+                "best_for": "Large noisy datasets requiring fast training",
+                "sklearn": "sklearn.ensemble.ExtraTreesRegressor",
+                "complexity": "Medium",
+                "eval_metrics": ["R² Score", "RMSE", "Feature Importance"],
+            },
+        ],
+    },
+    "clustering": [
+        {
+            "name": "K-Means",
+            "description": "Assigns each point to the nearest centroid.",
+            "pros": ["Fast and scalable", "Easy to implement", "Well-understood"],
+            "cons": ["Requires specifying K", "Assumes spherical clusters", "Sensitive to outliers"],
+            "best_for": "General-purpose clustering of numeric data",
+            "sklearn": "sklearn.cluster.KMeans",
+            "complexity": "Low",
+            "eval_metrics": ["Silhouette Score", "Inertia (Elbow Method)", "Davies-Bouldin Index"],
+        },
+        {
+            "name": "DBSCAN",
+            "description": "Density-based clustering — finds arbitrarily shaped clusters.",
+            "pros": ["No need to specify K", "Detects outliers as noise", "Finds non-spherical clusters"],
+            "cons": ["Sensitive to eps/min_samples parameters", "Struggles with varying densities"],
+            "best_for": "Datasets with noise and non-spherical cluster shapes",
+            "sklearn": "sklearn.cluster.DBSCAN",
+            "complexity": "Medium",
+            "eval_metrics": ["Silhouette Score", "Number of clusters detected"],
+        },
+        {
+            "name": "Hierarchical Clustering",
+            "description": "Builds a tree of clusters (dendrogram) via agglomerative or divisive methods.",
+            "pros": ["No need to specify K upfront", "Visual dendrogram", "Good for small datasets"],
+            "cons": ["O(n²) — slow on large datasets", "Hard to interpret for many clusters"],
+            "best_for": "Small datasets, exploratory analysis, gene expression data",
+            "sklearn": "sklearn.cluster.AgglomerativeClustering",
+            "complexity": "Medium",
+            "eval_metrics": ["Dendrogram", "Cophenetic Correlation"],
+        },
+    ],
+}
+
+
+def _build_ml_recommendations(df: pd.DataFrame, primary_keys: list, eda: dict, filename: str) -> Dict[str, Any]:
+    """Analyse dataset characteristics and return top ML model recommendations."""
+    n_rows = len(df)
+    n_cols = len(df.columns)
+
+    numeric_cols = [c for c in df.columns if c not in primary_keys and is_numeric_column(df, c)]
+    categorical_cols = [c for c in df.columns if c not in primary_keys and is_categorical_column(df, c, primary_keys)]
+
+    candidate_targets = detect_candidate_targets(df, primary_keys)
+
+    # Detect likely task type
+    if candidate_targets:
+        target_series = df[candidate_targets[0]].dropna()
+        task = detect_task_type(target_series)
+    else:
+        # No obvious categorical target → regression or clustering
+        # If no numeric with enough variance, default to clustering
+        # Otherwise regression
+        has_numeric_outcome = any(
+            df[c].nunique() > 20
+            for c in numeric_cols
+        )
+        task = "regression" if has_numeric_outcome else "clustering"
+
+    # Size bracket
+    if n_rows < 1000:
+        size_bracket = "small"
+        size_label = f"Small ({n_rows:,} rows)"
+    elif n_rows < 50000:
+        size_bracket = "medium"
+        size_label = f"Medium ({n_rows:,} rows)"
+    else:
+        size_bracket = "large"
+        size_label = f"Large ({n_rows:,} rows)"
+
+    # Pull model recommendations
+    if task == "clustering":
+        recs = _ML_CATALOG["clustering"][:3]
+    else:
+        db = _ML_CATALOG.get(task, _ML_CATALOG["classification"])
+        bracket_recs = db.get(size_bracket, db["medium"])
+        recs = bracket_recs[:3]
+
+    # Preprocessing suggestions
+    has_missing = df.isnull().values.any()
+    has_categoricals = len(categorical_cols) > 0
+    has_numeric = len(numeric_cols) > 0
+    is_imbalanced = False
+    if candidate_targets and task == "classification":
+        try:
+            counts = df[candidate_targets[0]].value_counts()
+            if len(counts) > 1 and counts.max() / counts.min() > 3:
+                is_imbalanced = True
+        except Exception:
+            pass
+
+    preprocessing = []
+    if has_missing:
+        preprocessing.append({
+            "step": "Missing Value Imputation",
+            "reason": "Dataset contains missing values that most models cannot handle natively.",
+            "options": ["SimpleImputer(strategy='median') for numeric", "SimpleImputer(strategy='most_frequent') for categorical", "IterativeImputer for complex patterns"]
+        })
+    if has_categoricals:
+        preprocessing.append({
+            "step": "Categorical Encoding",
+            "reason": f"{len(categorical_cols)} categorical column(s) need to be converted to numeric.",
+            "options": ["OneHotEncoder for nominal features (few categories)", "OrdinalEncoder for ordinal features", "TargetEncoder for high-cardinality features"]
+        })
+    if has_numeric:
+        preprocessing.append({
+            "step": "Feature Scaling",
+            "reason": "Numeric features may have different magnitudes — scaling helps distance-based and linear models.",
+            "options": ["StandardScaler (zero mean, unit variance) — recommended default", "MinMaxScaler (0–1 range) for bounded features", "RobustScaler if outliers are present"]
+        })
+    if is_imbalanced:
+        preprocessing.append({
+            "step": "Class Imbalance Handling",
+            "reason": "Target class distribution is imbalanced — models may be biased toward majority class.",
+            "options": ["class_weight='balanced' in most sklearn classifiers", "SMOTE (imbalanced-learn) for synthetic oversampling", "Threshold tuning on prediction probabilities"]
+        })
+    preprocessing.append({
+        "step": "Feature Selection",
+        "reason": "Removing irrelevant or redundant features reduces noise and speeds up training.",
+        "options": ["SelectKBest with f_classif/f_regression for filter method", "RFE (Recursive Feature Elimination) for wrapper method", "Feature importance from tree models for embedded method"]
+    })
+
+    # Evaluation metrics
+    if task == "classification":
+        n_classes = df[candidate_targets[0]].nunique() if candidate_targets else 2
+        eval_metrics = [
+            {"metric": "Accuracy", "when": "Balanced class distribution"},
+            {"metric": "F1 Score (macro/weighted)", "when": "Imbalanced classes — balances precision and recall"},
+            {"metric": "ROC-AUC", "when": "Binary classification — measures discriminative ability"},
+            {"metric": "Confusion Matrix", "when": "Understanding type of errors per class"},
+            {"metric": "Precision / Recall", "when": "When false positives or false negatives have different costs"},
+        ] if n_classes <= 2 else [
+            {"metric": "F1 Score (macro)", "when": "Multi-class with imbalanced distribution"},
+            {"metric": "Accuracy", "when": "Balanced multi-class datasets"},
+            {"metric": "Confusion Matrix", "when": "Diagnosing per-class errors in multi-class problems"},
+            {"metric": "Cohen's Kappa", "when": "Multi-class agreement beyond chance"},
+        ]
+    elif task == "regression":
+        eval_metrics = [
+            {"metric": "R² Score", "when": "Measure how much variance the model explains (1.0 = perfect)"},
+            {"metric": "RMSE", "when": "Penalises large errors — good when outliers matter"},
+            {"metric": "MAE", "when": "Robust to outliers — average absolute error"},
+            {"metric": "MAPE (%)", "when": "Percentage error — useful for business interpretation"},
+        ]
+    else:
+        eval_metrics = [
+            {"metric": "Silhouette Score", "when": "Measures cluster cohesion and separation (higher = better)"},
+            {"metric": "Elbow Method (Inertia)", "when": "Finding optimal K for K-Means"},
+            {"metric": "Davies-Bouldin Index", "when": "Lower = better separated clusters"},
+        ]
+
+    return {
+        "task": task,
+        "dataset_size": size_label,
+        "size_bracket": size_bracket,
+        "n_rows": n_rows,
+        "n_features": n_cols - len(primary_keys),
+        "numeric_features": len(numeric_cols),
+        "categorical_features": len(categorical_cols),
+        "candidate_targets": candidate_targets[:5],
+        "is_imbalanced": is_imbalanced,
+        "recommendations": recs,
+        "preprocessing_steps": preprocessing,
+        "evaluation_metrics": eval_metrics,
+    }
+
+
+def _advisor_model_from_name(name: str, task: str):
+    """Map recommendation names to available sklearn estimators."""
+    n = (name or "").lower()
+
+    if task == "classification":
+        if "logistic" in n:
+            return LogisticRegression(max_iter=300, n_jobs=-1, solver="saga", class_weight="balanced")
+        if "decision tree" in n:
+            return DecisionTreeClassifier(max_depth=8, class_weight="balanced", random_state=42)
+        if "random forest" in n:
+            return RandomForestClassifier(n_estimators=50, n_jobs=-1, class_weight="balanced", max_features="sqrt", random_state=42)
+        if "gradient boosting" in n or "xgboost" in n or "lightgbm" in n:
+            return GradientBoostingClassifier(n_estimators=50, learning_rate=0.1, max_depth=4, random_state=42)
+        if "extra trees" in n:
+            return ExtraTreesClassifier(n_estimators=50, n_jobs=-1, class_weight="balanced", random_state=42)
+        if "nearest" in n or "knn" in n:
+            return KNeighborsClassifier(n_neighbors=5, n_jobs=-1)
+        if "support vector" in n or n.strip() == "svm":
+            return SVC(C=1.0, kernel="rbf", probability=False)
+        if "neural network" in n or "mlp" in n:
+            return MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300, random_state=42)
+        return None
+
+    if task == "regression":
+        if "ridge" in n or "lasso" in n:
+            return Ridge()
+        if "decision tree" in n:
+            return DecisionTreeRegressor(max_depth=8, random_state=42)
+        if "random forest" in n:
+            return RandomForestRegressor(n_estimators=50, n_jobs=-1, random_state=42)
+        if "gradient boosting" in n or "xgboost" in n or "lightgbm" in n:
+            return GradientBoostingRegressor(n_estimators=50, learning_rate=0.1, max_depth=4, random_state=42)
+        if "extra trees" in n:
+            return ExtraTreesRegressor(n_estimators=50, n_jobs=-1, random_state=42)
+        if "nearest" in n or "knn" in n:
+            return KNeighborsRegressor(n_neighbors=5, n_jobs=-1)
+        if "linear" in n:
+            return LinearRegression()
+        if "support vector" in n or "svr" in n:
+            return SVR(C=1.0, epsilon=0.1, kernel="rbf")
+        if "neural network" in n or "mlp" in n:
+            return MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=300, random_state=42)
+        return None
+
+    return None
+
+
+def _build_regression_researcher_summary(benchmark: Dict[str, Any]) -> str:
+    """Create a concise researcher-facing explanation using benchmark evidence."""
+    rows = [r for r in benchmark.get("models", []) if not r.get("error")]
+    if not rows:
+        return "Benchmark completed, but none of the regression models produced valid scores. Review feature quality and target consistency before model selection."
+
+    rows_sorted = sorted(rows, key=lambda r: (r.get("cv_r2_mean") is not None, r.get("cv_r2_mean", -np.inf)), reverse=True)
+    best = rows_sorted[0]
+    second = rows_sorted[1] if len(rows_sorted) > 1 else None
+
+    best_name = best.get("model", "Best model")
+    best_r2 = best.get("r2_score")
+    best_adj_r2 = best.get("adj_r_square")
+    best_rmse = best.get("root_mean_squared_error_rmse")
+    best_mae = best.get("mean_absolute_error_mae")
+    best_cv = best.get("cv_r2_mean")
+    best_stability = best.get("stability")
+
+    gap_text = ""
+    if second and second.get("cv_r2_mean") is not None and best_cv is not None:
+        gap = round(float(best_cv - second.get("cv_r2_mean", 0.0)), 4)
+        gap_text = f" It outperformed the next best model ({second.get('model')}) by {gap} points on CV R²."
+
+    return (
+        f"Based on the obtained benchmark metrics, {best_name} is the most suitable model for this dataset. "
+        f"It achieved R²={best_r2}, Adjusted R²={best_adj_r2}, RMSE={best_rmse}, and MAE={best_mae}, "
+        f"with cross-validation mean R²={best_cv} and stability={best_stability}%."
+        f"{gap_text} "
+        f"These results indicate the best balance of predictive strength and generalization for researcher-facing analysis."
+    )
+
+
+def _run_ml_advisor_benchmark(df: pd.DataFrame, primary_keys: list, rec_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Train candidate models, evaluate, and return a metric comparison table."""
+    task = rec_result.get("task")
+    if task not in ("classification", "regression"):
+        return {
+            "available": False,
+            "reason": "Benchmarking currently supports classification and regression tasks.",
+            "task": task,
+            "models": [],
+        }
+
+    candidate_targets = rec_result.get("candidate_targets") or detect_candidate_targets(df, primary_keys)
+    if not candidate_targets:
+        return {
+            "available": False,
+            "reason": "No suitable target column detected for supervised training.",
+            "task": task,
+            "models": [],
+        }
+
+    target_column = candidate_targets[0]
+    data = sample_dataframe(df, MAX_PRED_SAMPLE_ROWS).copy().dropna(subset=[target_column])
+    if data.empty:
+        return {
+            "available": False,
+            "reason": "No rows remain after dropping missing target values.",
+            "task": task,
+            "models": [],
+        }
+
+    selected_features = select_prediction_features(data, target_column, primary_keys)
+    if not selected_features:
+        return {
+            "available": False,
+            "reason": "No suitable features found for model training.",
+            "task": task,
+            "models": [],
+        }
+
+    # Extra guard: remove non-sensible numeric columns (ID-like fields) from benchmark features
+    filtered_features = []
+    for c in selected_features:
+        if is_numeric_column(data, c) and (not is_sensible_numeric_column(data, c, primary_keys=primary_keys)):
+            continue
+        filtered_features.append(c)
+    selected_features = filtered_features
+
+    if not selected_features:
+        return {
+            "available": False,
+            "reason": "All candidate features were identifier-like or unsuitable after filtering.",
+            "task": task,
+            "models": [],
+        }
+
+    data = data[selected_features + [target_column]].copy()
+    X = data[selected_features]
+    numeric_features = [c for c in selected_features if is_numeric_column(data, c)]
+    categorical_features = [c for c in selected_features if c not in numeric_features]
+    preprocessor = _build_preprocessor(numeric_features, categorical_features)
+
+    def _compact_err(exc: Exception) -> str:
+        msg = str(exc).replace("\n", " ").strip()
+        if "Cannot use median strategy with non-numeric data" in msg:
+            return "Numeric preprocessing failed due to mixed string values in a numeric feature."
+        if len(msg) > 220:
+            return msg[:220] + "..."
+        return msg
+
+    # Build model set
+    models = []
+
+    if task == "classification":
+        # Keep recommendation-driven behavior for classification
+        seen = set()
+        for rec in rec_result.get("recommendations", []):
+            m_name = rec.get("name", "")
+            estimator = _advisor_model_from_name(m_name, task)
+            if estimator is None or m_name in seen:
+                continue
+            seen.add(m_name)
+            models.append((m_name, estimator))
+
+    if not models and task == "classification":
+        models = [
+            ("Logistic Regression", LogisticRegression(max_iter=300, n_jobs=-1, solver="saga", class_weight="balanced")),
+            ("Random Forest", RandomForestClassifier(n_estimators=50, n_jobs=-1, class_weight="balanced", max_features="sqrt", random_state=42)),
+            ("Gradient Boosting", GradientBoostingClassifier(n_estimators=50, learning_rate=0.1, max_depth=4, random_state=42)),
+        ]
+
+    if task == "regression":
+        # Evaluate the full requested regression algorithm set
+        models = [
+            ("ExtraTreesRegressor", ExtraTreesRegressor(n_estimators=50, n_jobs=-1, random_state=42)),
+            ("RandomForestRegressor", RandomForestRegressor(n_estimators=50, n_jobs=-1, random_state=42)),
+            ("BaggingRegressor", BaggingRegressor(n_estimators=50, random_state=42)),
+            ("DecisionTreeRegressor", DecisionTreeRegressor(max_depth=8, random_state=42)),
+            ("KNeighborsRegressor", KNeighborsRegressor(n_neighbors=5, n_jobs=-1)),
+            ("GradientBoostingRegressor", GradientBoostingRegressor(n_estimators=50, learning_rate=0.1, max_depth=4, random_state=42)),
+            ("LinearRegression", LinearRegression()),
+            ("Ridge Regression", Ridge()),
+            ("Lasso Regression", Lasso(alpha=0.01, max_iter=5000, random_state=42)),
+        ]
+
+        # Optional XGBoost if installed
+        try:
+            from xgboost import XGBRegressor  # type: ignore
+            models.insert(3, ("XGBRegressor", XGBRegressor(
+                n_estimators=120,
+                learning_rate=0.08,
+                max_depth=6,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=42,
+                n_jobs=-1,
+                objective="reg:squarederror",
+            )))
+        except Exception:
+            # Keep a placeholder so researcher sees why it's missing
+            results.append({"model": "XGBRegressor", "error": "xgboost package not installed in environment."})
+
+    results = []
+    best_model_name = ""
+    best_score = -np.inf
+
+    if task == "classification":
+        y = data[target_column].astype(str)
+        le = LabelEncoder()
+        y_enc = le.fit_transform(y)
+        if len(np.unique(y_enc)) < 2:
+            return {
+                "available": False,
+                "reason": "Target column must have at least 2 classes.",
+                "task": task,
+                "models": [],
+            }
+
+        class_counts = np.bincount(y_enc)
+        can_stratify = class_counts.min() >= 2
+        X_tr, X_te, y_tr, y_te = train_test_split(
+            X, y_enc, test_size=0.2, random_state=42,
+            stratify=y_enc if can_stratify else None
+        )
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) if can_stratify else KFold(n_splits=3, shuffle=True, random_state=42)
+
+        for model_name, estimator in models:
+            try:
+                pipe = Pipeline([("preprocessor", preprocessor), ("model", estimator)])
+                cv_scores = cross_val_score(pipe, X_tr, y_tr, cv=cv, scoring="f1_macro", n_jobs=-1)
+                pipe.fit(X_tr, y_tr)
+                y_pred = pipe.predict(X_te)
+
+                row = {
+                    "model": model_name,
+                    "accuracy": round(float(accuracy_score(y_te, y_pred)), 4),
+                    "precision_macro": round(float(precision_score(y_te, y_pred, average="macro", zero_division=0)), 4),
+                    "recall_macro": round(float(recall_score(y_te, y_pred, average="macro", zero_division=0)), 4),
+                    "f1_macro": round(float(f1_score(y_te, y_pred, average="macro", zero_division=0)), 4),
+                    "cv_f1_mean": round(float(np.mean(cv_scores)), 4),
+                    "cv_f1_std": round(float(np.std(cv_scores)), 4),
+                    "stability": round(float(max(0.0, 1.0 - np.std(cv_scores)) * 100), 1),
+                }
+                results.append(row)
+
+                if row["cv_f1_mean"] > best_score:
+                    best_score = row["cv_f1_mean"]
+                    best_model_name = model_name
+            except Exception as me:
+                results.append({"model": model_name, "error": _compact_err(me)})
+
+        for r in results:
+            r["is_best"] = r.get("model") == best_model_name
+
+        return {
+            "available": True,
+            "task": "classification",
+            "target_column": target_column,
+            "metrics_compared": ["accuracy", "precision_macro", "recall_macro", "f1_macro", "cv_f1_mean", "cv_f1_std", "stability"],
+            "models": results,
+            "best_model": best_model_name,
+            "train_size": len(X_tr),
+            "test_size": len(X_te),
+        }
+
+    # regression
+    y = pd.to_numeric(data[target_column], errors="coerce")
+    data = data[y.notna()].copy()
+    y = y[y.notna()]
+    X = data[selected_features]
+    if len(y) < 20:
+        return {
+            "available": False,
+            "reason": "Not enough rows for reliable regression benchmarking.",
+            "task": task,
+            "models": [],
+        }
+
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+    cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+    for model_name, estimator in models:
+        try:
+            pipe = Pipeline([("preprocessor", preprocessor), ("model", estimator)])
+            cv_scores = cross_val_score(pipe, X_tr, y_tr, cv=cv, scoring="r2", n_jobs=-1)
+            pipe.fit(X_tr, y_tr)
+            y_pred = pipe.predict(X_te)
+
+            y_te_arr = np.asarray(y_te)
+            y_pred_arr = np.asarray(y_pred)
+            nonzero_mask = y_te_arr != 0
+            mape = float(np.mean(np.abs((y_te_arr[nonzero_mask] - y_pred_arr[nonzero_mask]) / y_te_arr[nonzero_mask])) * 100) if nonzero_mask.any() else None
+
+            n_test = len(y_te_arr)
+            p_feats = max(1, len(selected_features))
+            r2_val = float(r2_score(y_te, y_pred))
+            adj_r2 = None
+            if n_test > (p_feats + 1):
+                adj_r2 = 1.0 - (1.0 - r2_val) * ((n_test - 1) / (n_test - p_feats - 1))
+
+            mse_val = float(mean_squared_error(y_te, y_pred))
+            rmse_val = float(np.sqrt(mse_val))
+
+            rmsle_val = None
+            if np.all(y_te_arr >= 0) and np.all(y_pred_arr >= 0):
+                try:
+                    rmsle_val = float(np.sqrt(np.mean((np.log1p(y_pred_arr) - np.log1p(y_te_arr)) ** 2)))
+                except Exception:
+                    rmsle_val = None
+
+            row = {
+                "model": model_name,
+                "model_name": model_name,
+                "r2": round(r2_val, 4),
+                "r2_score": round(r2_val, 4),
+                "adj_r_square": round(float(adj_r2), 4) if adj_r2 is not None else None,
+                "mean_absolute_error_mae": round(float(mean_absolute_error(y_te, y_pred)), 4),
+                "root_mean_squared_error_rmse": round(rmse_val, 4),
+                "mean_absolute_percentage_error_mape": round(mape, 4) if mape is not None else None,
+                "mean_squared_error_mse": round(mse_val, 4),
+                "root_mean_squared_log_error_rmsle": round(rmsle_val, 4) if rmsle_val is not None else None,
+                "mae": round(float(mean_absolute_error(y_te, y_pred)), 4),
+                "rmse": round(rmse_val, 4),
+                "mape": round(mape, 4) if mape is not None else None,
+                "cv_r2_mean": round(float(np.mean(cv_scores)), 4),
+                "cv_r2_std": round(float(np.std(cv_scores)), 4),
+                "stability": round(float(max(0.0, 1.0 - np.std(cv_scores)) * 100), 1),
+            }
+            results.append(row)
+
+            if row["cv_r2_mean"] > best_score:
+                best_score = row["cv_r2_mean"]
+                best_model_name = model_name
+        except Exception as me:
+            results.append({"model": model_name, "error": _compact_err(me)})
+
+    for r in results:
+        r["is_best"] = r.get("model") == best_model_name
+
+    return {
+        "available": True,
+        "task": "regression",
+        "target_column": target_column,
+        "metrics_compared": [
+            "adj_r_square",
+            "mean_absolute_error_mae",
+            "root_mean_squared_error_rmse",
+            "mean_absolute_percentage_error_mape",
+            "mean_squared_error_mse",
+            "root_mean_squared_log_error_rmsle",
+            "r2_score",
+            "cv_r2_mean",
+            "cv_r2_std",
+            "stability",
+        ],
+        "models": results,
+        "best_model": best_model_name,
+        "train_size": len(X_tr),
+        "test_size": len(X_te),
+        "researcher_summary": _build_regression_researcher_summary({
+            "models": results,
+            "best_model": best_model_name,
+        }),
+    }
+
+
+@app.get("/api/ml-recommendations/{dataset_id}")
+async def get_ml_recommendations(dataset_id: str):
+    """Return ML model recommendations for a tabular dataset."""
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+    ds = datasets[dataset_id]
+    if ds.get("dataset_type") in ("image", "single_image"):
+        raise HTTPException(400, "ML recommendations are for tabular datasets only. Use the Image tab for image datasets.")
+
+    cache = ds.setdefault("analysis_cache", {})
+    if "ml_recommendations" in cache:
+        return cache["ml_recommendations"]
+
+    try:
+        df = ds["df"]
+        primary_keys = ds.get("primary_keys", [])
+        eda = eda_results.get(dataset_id, {})
+        filename = ds["filename"]
+
+        result = _build_ml_recommendations(df, primary_keys, eda, filename)
+
+        # AI-powered reasoning
+        try:
+            ai_prompt = f"""You are a senior ML engineer. Based on this dataset profile, write 3-4 concise sentences explaining
+which machine learning approach is most suitable and why. Be specific about the dataset characteristics that drive your recommendation.
+
+Dataset: {filename}
+Rows: {result['n_rows']:,}
+Features: {result['n_features']} ({result['numeric_features']} numeric, {result['categorical_features']} categorical)
+Detected task: {result['task']}
+Dataset size bracket: {result['dataset_size']}
+Class imbalanced: {result['is_imbalanced']}
+Top recommended model: {result['recommendations'][0]['name'] if result['recommendations'] else 'N/A'}
+
+No markdown. Plain text only. Focus on why this model fits THIS dataset."""
+            result["ai_reasoning"] = get_gemini_response(ai_prompt, "lite")
+        except Exception:
+            result["ai_reasoning"] = "AI reasoning unavailable."
+
+        cache["ml_recommendations"] = result
+        return result
+
+    except Exception as e:
+        logger.error(f"ML recommendations error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"ML recommendations failed: {str(e)}")
+
+
+@app.post("/api/ml-benchmark/{dataset_id}")
+async def run_ml_benchmark(dataset_id: str, force: bool = False):
+    """Run full ML benchmark for Advisor and compare evaluation metrics across models."""
+    if dataset_id not in datasets:
+        raise HTTPException(404, "Dataset not found")
+
+    ds = datasets[dataset_id]
+    if ds.get("dataset_type") in ("image", "single_image", "multi_image"):
+        raise HTTPException(400, "ML benchmark is for tabular datasets only.")
+
+    cache = ds.setdefault("analysis_cache", {})
+    if (not force) and ("ml_benchmark" in cache):
+        return cache["ml_benchmark"]
+
+    try:
+        df = ds["df"]
+        primary_keys = ds.get("primary_keys", [])
+        eda = eda_results.get(dataset_id, {})
+        filename = ds.get("filename", "dataset")
+
+        rec_result = cache.get("ml_recommendations")
+        if not rec_result:
+            rec_result = _build_ml_recommendations(df, primary_keys, eda, filename)
+
+        benchmark = _run_ml_advisor_benchmark(df, primary_keys, rec_result)
+        cache["ml_benchmark"] = benchmark
+        return benchmark
+
+    except Exception as e:
+        logger.error(f"ML benchmark error: {str(e)}", exc_info=True)
+        raise HTTPException(500, f"ML benchmark failed: {str(e)}")
+
 
 @app.get("/api/export/{dataset_id}/ppt")
 async def export_ppt(dataset_id: str):

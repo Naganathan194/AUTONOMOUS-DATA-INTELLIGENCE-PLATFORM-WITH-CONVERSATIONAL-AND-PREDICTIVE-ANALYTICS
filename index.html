@@ -3,167 +3,234 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DataSet Querying LLM</title>
+    <title>Autonomous Data Intelligence Platform</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { font-family: 'Inter', sans-serif; }
         body { background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0a0e27 100%); min-height: 100vh; }
-        .glass-card { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); }
-        .gradient-text { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-        .gradient-button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transition: all 0.3s ease; }
-        .gradient-button:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4); }
+        .glass-card { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+        .gradient-text { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+        .gradient-button { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); transition: all 0.3s ease; }
+        .gradient-button:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(102,126,234,0.4); }
         .gradient-button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-        .insight-card { background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%); border-left: 4px solid #667eea; transition: all 0.3s ease; }
+        .img-gradient-button { background: linear-gradient(135deg,#f093fb 0%,#f5576c 100%); transition: all 0.3s ease; }
+        .img-gradient-button:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(245,87,108,0.4); }
+        .insight-card { background: linear-gradient(135deg,rgba(102,126,234,0.15) 0%,rgba(118,75,162,0.15) 100%); border-left: 4px solid #667eea; transition: all 0.3s ease; }
         .insight-card:hover { transform: translateX(5px); border-left-color: #764ba2; }
-        .loader { border: 3px solid rgba(255, 255, 255, 0.1); border-top: 3px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .img-insight-card { background: linear-gradient(135deg,rgba(240,147,251,0.12) 0%,rgba(245,87,108,0.12) 100%); border-left: 4px solid #f093fb; transition: all 0.3s ease; }
+        .img-insight-card:hover { transform: translateX(5px); }
+        .loader { border: 3px solid rgba(255,255,255,0.1); border-top: 3px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        .loader-pink { border: 3px solid rgba(255,255,255,0.1); border-top: 3px solid #f093fb; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
         .dataset-pill { transition: all 0.3s ease; cursor: pointer; }
         .dataset-pill:hover { transform: scale(1.05); }
-        .dataset-pill.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .tab-active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .dataset-pill.active { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); }
+        .dataset-pill.active-img { background: linear-gradient(135deg,#f093fb 0%,#f5576c 100%); }
+        .tab-active { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); color: white; }
+        .tab-active-img { background: linear-gradient(135deg,#f093fb 0%,#f5576c 100%); color: white; }
         .chat-bubble { animation: fadeIn 0.3s ease-in; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn { from {opacity:0;transform:translateY(10px)} to {opacity:1;transform:translateY(0)} }
         input[type="file"] { display: none; }
-        .pagination-button { padding: 0.5rem 1rem; border-radius: 0.5rem; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); transition: all 0.3s ease; }
-        .pagination-button:hover:not(:disabled) { background: rgba(102, 126, 234, 0.3); }
-        .pagination-button:disabled { opacity: 0.3; cursor: not-allowed; }
-        .pagination-button.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .faq-suggestion { min-width: 180px; white-space: normal; box-shadow: 0 2px 8px 0 rgba(102,126,234,0.10); cursor:pointer; font-size:15px; } .faq-suggestion:hover { background: linear-gradient(135deg,#764ba2 0%,#667eea 100%) !important; }
+        .pagination-button { padding:0.5rem 1rem; border-radius:0.5rem; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); transition:all 0.3s ease; }
+        .pagination-button:hover:not(:disabled) { background:rgba(102,126,234,0.3); }
+        .pagination-button:disabled { opacity:0.3; cursor:not-allowed; }
+        .pagination-button.active { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); }
+        .faq-suggestion { min-width:180px; white-space:normal; box-shadow:0 2px 8px 0 rgba(102,126,234,0.10); cursor:pointer; font-size:15px; }
+        .faq-suggestion:hover { background:linear-gradient(135deg,#764ba2 0%,#667eea 100%) !important; }
+        .aug-card { transition: all 0.3s ease; }
+        .aug-card:hover { transform: translateY(-4px); box-shadow: 0 12px 30px rgba(240,147,251,0.2); }
+        .img-tab-btn { padding:0.6rem 1.2rem; border-radius:0.75rem; font-weight:600; white-space:nowrap; transition:all 0.2s; background:rgba(255,255,255,0.05); }
+        .img-tab-btn:hover { background:rgba(240,147,251,0.15); }
+        .upload-zone { border: 2px dashed rgba(255,255,255,0.2); transition: all 0.3s; }
+        .upload-zone:hover { border-color: #667eea; background: rgba(102,126,234,0.05); }
+        .upload-zone-img:hover { border-color: #f093fb; background: rgba(240,147,251,0.05); }
     </style>
 </head>
 <body class="text-white">
     <!-- Header -->
-    <header class="glass-card py-6 px-8 mb-8">
+    <header class="glass-card py-5 px-8 mb-8">
         <div class="max-w-7xl mx-auto flex items-center justify-between">
             <div class="flex items-center space-x-4">
-                <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center">
-                    <span class="text-2xl">🌀</span>
+                <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center shadow-lg">
+                    <span class="text-2xl">🧠</span>
                 </div>
                 <div>
-                    <h1 class="text-3xl font-bold gradient-text">DataSet Querying LLM</h1>
-                    <p class="text-sm text-gray-400">AI-Powered Data Analysis Platform</p>
+                    <h1 class="text-2xl font-bold gradient-text">Autonomous Data Intelligence Platform</h1>
+                    <p class="text-xs text-gray-400">Powered by Llama 3.1 · LLaVA · Ollama — 100% Local AI</p>
                 </div>
             </div>
-            <button onclick="showUploadModal()" class="gradient-button px-6 py-2 rounded-lg font-semibold text-white">
-                📤 Upload Dataset
+            <button onclick="showUploadModal()" class="gradient-button px-6 py-2.5 rounded-xl font-semibold text-white flex items-center gap-2">
+                <span>⬆</span> Upload Data
             </button>
         </div>
     </header>
 
     <!-- Main Content -->
     <main class="max-w-7xl mx-auto px-8 pb-20">
-        <!-- Welcome Screen -->
-        <div id="welcomeScreen" class="text-center py-20">
-            <div class="glass-card p-12 rounded-2xl max-w-2xl mx-auto">
-                <div class="text-6xl mb-6">📊</div>
-                <h2 class="text-4xl font-bold mb-4 gradient-text">Welcome to Your Data Lab</h2>
-                <p class="text-gray-300 text-lg mb-8">Upload your datasets and unlock powerful AI-driven insights in seconds</p>
-                <button onclick="showUploadModal()" class="gradient-button px-8 py-4 rounded-xl font-bold text-lg text-white inline-flex items-center space-x-2">
-                    <span>🚀</span>
-                    <span>Get Started</span>
-                </button>
+
+        <!-- ══ Welcome Screen ══ -->
+        <div id="welcomeScreen" class="text-center py-16">
+            <div class="glass-card p-12 rounded-3xl max-w-3xl mx-auto">
+                <div class="text-6xl mb-6">🧠</div>
+                <h2 class="text-4xl font-bold mb-3 gradient-text">Welcome to ADIP</h2>
+                <p class="text-gray-300 text-lg mb-2">Autonomous Data Intelligence Platform</p>
+                <p class="text-gray-500 text-sm mb-10">All AI runs locally via Ollama — no API keys, no quota limits</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    <div class="glass-card p-6 rounded-2xl border border-purple-500/30 hover:border-purple-400/60 transition cursor-pointer" onclick="showUploadModal('tabular')">
+                        <div class="text-4xl mb-3">📊</div>
+                        <h3 class="text-xl font-bold mb-2">Tabular Dataset</h3>
+                        <p class="text-gray-400 text-sm">Upload CSV / XLSX / JSON files for EDA, correlations, AI insights, ML algorithm recommendations and natural-language queries.</p>
+                        <div class="mt-4 text-purple-400 text-sm font-semibold">Upload CSV / XLSX / JSON →</div>
+                    </div>
+                    <div class="glass-card p-6 rounded-2xl border border-pink-500/30 hover:border-pink-400/60 transition cursor-pointer" onclick="showUploadModal('photo')">
+                        <div class="text-4xl mb-3">🖼️</div>
+                        <h3 class="text-xl font-bold mb-2">Image / Photo Dataset</h3>
+                        <p class="text-gray-400 text-sm">Upload a ZIP folder of images OR select individual photo files. Get LLaVA-powered content detection, augmentation previews and CV model recommendations.</p>
+                        <div class="mt-4 text-pink-400 text-sm font-semibold">Upload ZIP or image files →</div>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <!-- Dashboard -->
-        <div id="dashboard" class="hidden">
-            <!-- Dataset Switcher -->
-            <div id="datasetSwitcher" class="glass-card p-4 rounded-xl mb-6 overflow-x-auto">
-                <div class="flex space-x-3" id="datasetList"></div>
-            </div>
+        <!-- ══ Dataset Switcher (shared) ══ -->
+        <div id="datasetSwitcherWrapper" class="hidden glass-card p-4 rounded-xl mb-6 overflow-x-auto">
+            <div class="flex items-center gap-3" id="datasetList"></div>
+        </div>
 
+        <!-- ══ TABULAR Dashboard ══ -->
+        <div id="dashboard" class="hidden">
             <!-- Stats Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
-                <div class="glass-card p-6 rounded-xl border-l-4 border-purple-500">
-                    <div class="text-sm text-gray-400 mb-2">Total Rows</div>
-                    <div id="statRows" class="text-3xl font-bold">0</div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="glass-card p-5 rounded-xl border-l-4 border-purple-500">
+                    <div class="text-xs text-gray-400 mb-1">Rows</div>
+                    <div id="statRows" class="text-2xl font-bold">0</div>
                 </div>
-                <div class="glass-card p-6 rounded-xl border-l-4 border-pink-500">
-                    <div class="text-sm text-gray-400 mb-2">Total Columns</div>
-                    <div id="statColumns" class="text-3xl font-bold">0</div>
+                <div class="glass-card p-5 rounded-xl border-l-4 border-pink-500">
+                    <div class="text-xs text-gray-400 mb-1">Columns</div>
+                    <div id="statColumns" class="text-2xl font-bold">0</div>
                 </div>
-                <div class="glass-card p-6 rounded-xl border-l-4 border-blue-500">
-                    <div class="text-sm text-gray-400 mb-2">Active Dataset</div>
-                    <div id="statDataset" class="text-lg font-semibold truncate">-</div>
+                <div class="glass-card p-5 rounded-xl border-l-4 border-blue-500">
+                    <div class="text-xs text-gray-400 mb-1">Dataset</div>
+                    <div id="statDataset" class="text-sm font-semibold truncate">-</div>
                 </div>
-                <div id="healthScoreWidget" class="glass-card p-6 rounded-xl">
-                    <div class="text-xs text-gray-400">📊 Data Health</div>
+                <div id="healthScoreWidget" class="glass-card p-5 rounded-xl">
+                    <div class="text-xs text-gray-400">📊 Health</div>
                     <div class="text-gray-500 text-sm mt-1">Loading…</div>
                 </div>
-                <div class="glass-card p-6 rounded-xl">
-                    <button onclick="exportPPT()" class="gradient-button w-full py-3 rounded-lg font-semibold text-white">
-                        📥 Export Report
-                    </button>
-                </div>
             </div>
 
-            <!-- Tabs -->
+            <!-- Tabular Tabs (no Predictive, no Model Suggest — replaced by ML Advisor) -->
             <div class="glass-card p-2 rounded-xl mb-6">
-                <div class="flex space-x-2 overflow-x-auto">
-                    <button onclick="switchTab('overview')" id="tab-overview" class="tab-active px-6 py-3 rounded-lg font-semibold whitespace-nowrap">📊 Overview</button>
-                    <button onclick="switchTab('numerical')" id="tab-numerical" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🔢 Numerical</button>
-                    <button onclick="switchTab('categorical')" id="tab-categorical" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📚 Categorical</button>
-                    <button onclick="switchTab('correlations')" id="tab-correlations" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📈 Correlations</button>
-                    <button onclick="switchTab('outliers')" id="tab-outliers" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">⚠️ Outliers</button>
-                    <button onclick="switchTab('timeseries')" id="tab-timeseries" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">📅 Time Series</button>
-                    <button onclick="switchTab('insights')" id="tab-insights" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">💡 AI Insights</button>
-                    <button onclick="switchTab('predictive')" id="tab-predictive" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🧠 Predictive</button>
-                    <button onclick="switchTab('image_analysis')" id="tab-image_analysis" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🖼️ Image</button>
-                    <button onclick="switchTab('chat')" id="tab-chat" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🤖 Ask AI</button>
-                    <button onclick="switchTab('explorer')" id="tab-explorer" class="px-6 py-3 rounded-lg font-semibold whitespace-nowrap hover:bg-white/5">🔍 Explorer</button>
+                <div class="flex space-x-1 overflow-x-auto">
+                    <button onclick="switchTab('overview')"     id="tab-overview"     class="tab-active px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm">📊 Overview</button>
+                    <button onclick="switchTab('numerical')"    id="tab-numerical"    class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">🔢 Numerical</button>
+                    <button onclick="switchTab('categorical')"  id="tab-categorical"  class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">📚 Categorical</button>
+                    <button onclick="switchTab('correlations')" id="tab-correlations" class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">📈 Correlations</button>
+                    <button onclick="switchTab('outliers')"     id="tab-outliers"     class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">⚠️ Outliers</button>
+                    <button onclick="switchTab('timeseries')"   id="tab-timeseries"   class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">📅 Time Series</button>
+                    <button onclick="switchTab('insights')"     id="tab-insights"     class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">💡 AI Insights</button>
+                    <button onclick="switchTab('ml_advisor')"   id="tab-ml_advisor"   class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">🤖 ML Advisor</button>
+                    <button onclick="switchTab('chat')"         id="tab-chat"         class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">💬 Ask AI</button>
+                    <button onclick="switchTab('explorer')"     id="tab-explorer"     class="px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm hover:bg-white/5">🔍 Explorer</button>
+                    <button onclick="exportPPT()" class="ml-auto px-5 py-2.5 rounded-lg font-semibold whitespace-nowrap text-sm bg-white/5 hover:bg-white/10">📥 Export PPT</button>
                 </div>
             </div>
-
-            <!-- Tab Content -->
             <div id="tabContent" class="glass-card p-8 rounded-2xl min-h-96"></div>
         </div>
+
+        <!-- ══ IMAGE Dashboard ══ -->
+        <div id="imageDashboard" class="hidden">
+            <!-- Image Stats Bar -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="glass-card p-5 rounded-xl border-l-4 border-pink-500">
+                    <div class="text-xs text-gray-400 mb-1">Total Images</div>
+                    <div id="imgStatTotal" class="text-2xl font-bold text-pink-300">—</div>
+                </div>
+                <div class="glass-card p-5 rounded-xl border-l-4 border-purple-500">
+                    <div class="text-xs text-gray-400 mb-1">Classes</div>
+                    <div id="imgStatClasses" class="text-2xl font-bold text-purple-300">—</div>
+                </div>
+                <div class="glass-card p-5 rounded-xl border-l-4 border-blue-500">
+                    <div class="text-xs text-gray-400 mb-1">Avg Dimensions</div>
+                    <div id="imgStatDims" class="text-sm font-bold text-blue-300">—</div>
+                </div>
+                <div class="glass-card p-5 rounded-xl border-l-4 border-green-500">
+                    <div class="text-xs text-gray-400 mb-1">File</div>
+                    <div id="imgStatFile" class="text-sm font-semibold truncate text-green-300">—</div>
+                </div>
+            </div>
+
+            <!-- Image Tabs -->
+            <div class="glass-card p-2 rounded-xl mb-6">
+                <div class="flex space-x-1 overflow-x-auto">
+                    <button onclick="switchImgTab('img_overview')"    id="imgtab-img_overview"    class="tab-active-img img-tab-btn text-sm">📊 Overview</button>
+                    <button onclick="switchImgTab('img_insights')"    id="imgtab-img_insights"    class="img-tab-btn text-sm">🔍 AI Content Insights</button>
+                    <button onclick="switchImgTab('img_augment')"     id="imgtab-img_augment"     class="img-tab-btn text-sm">🛠️ Augmentation</button>
+                    <button onclick="switchImgTab('img_previews')"    id="imgtab-img_previews"    class="img-tab-btn text-sm">🖼️ Previews</button>
+                    <button onclick="switchImgTab('img_ml')"          id="imgtab-img_ml"          class="img-tab-btn text-sm">🤖 Vision Models</button>
+                </div>
+            </div>
+            <div id="imgTabContent" class="glass-card p-8 rounded-2xl min-h-96"></div>
+        </div>
+
     </main>
 
-    <!-- Upload Modal -->
+    <!-- ══ Upload Modal ══ -->
     <div id="uploadModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
         <div class="glass-card p-8 rounded-2xl max-w-lg w-full mx-4">
-            <h3 class="text-2xl font-bold mb-6 gradient-text">Upload Dataset</h3>
+            <h3 class="text-2xl font-bold mb-2 gradient-text">Upload Data</h3>
+            <p class="text-gray-400 text-sm mb-6">Choose your data type below</p>
 
-            <!-- Tab switcher -->
-            <div class="flex space-x-2 mb-6">
+            <!-- Mode switcher — 2 clean options -->
+            <div class="grid grid-cols-2 gap-3 mb-6">
                 <button onclick="setUploadMode('tabular')" id="uploadModeTabular"
-                    class="flex-1 py-2 rounded-lg font-semibold text-sm tab-active">
-                    📊 Tabular (CSV / XLSX)
+                    class="py-3 px-4 rounded-xl font-semibold text-sm tab-active flex flex-col items-center gap-1">
+                    <span class="text-2xl">📊</span>
+                    <span>Tabular Data</span>
+                    <span class="text-xs opacity-70">CSV / XLSX / JSON</span>
                 </button>
-                <button onclick="setUploadMode('image')" id="uploadModeImage"
-                    class="flex-1 py-2 rounded-lg font-semibold text-sm bg-white/5 hover:bg-white/10">
-                    🖼️ Image Dataset (ZIP)
+                <button onclick="setUploadMode('photo')" id="uploadModePhoto"
+                    class="py-3 px-4 rounded-xl font-semibold text-sm bg-white/5 hover:bg-white/10 flex flex-col items-center gap-1 border border-white/10">
+                    <span class="text-2xl">🖼️</span>
+                    <span>Photos / Images</span>
+                    <span class="text-xs opacity-70">ZIP or individual files</span>
                 </button>
             </div>
 
-            <!-- Tabular upload -->
+            <!-- ── Tabular upload area ── -->
             <div id="tabularUploadArea">
-                <label for="fileInput" class="block p-10 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
+                <label for="fileInput" class="upload-zone block p-10 rounded-xl cursor-pointer text-center">
                     <div class="text-5xl mb-3">📁</div>
-                    <p class="text-lg font-semibold mb-1">Click to upload or drag & drop</p>
-                    <p class="text-sm text-gray-400">CSV or XLSX files supported</p>
-                    <p class="text-xs text-gray-500 mt-1">You can upload multiple datasets</p>
+                    <p class="text-lg font-semibold mb-1">Click to browse or drag &amp; drop</p>
+                    <p class="text-sm text-gray-400">CSV, XLSX, or JSON files supported</p>
                 </label>
-                <input type="file" id="fileInput" accept=".csv,.xlsx" onchange="handleFileUpload(event)">
+                <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.json" onchange="handleFileUpload(event)">
             </div>
 
-            <!-- Image zip upload -->
-            <div id="imageUploadArea" class="hidden">
-                <label for="imageFileInput" class="block p-10 rounded-xl cursor-pointer text-center border-2 border-dashed border-white/20 hover:border-purple-500 transition">
-                    <div class="text-5xl mb-3">🗜️</div>
-                    <p class="text-lg font-semibold mb-1">Upload ZIP of Images</p>
-                    <p class="text-sm text-gray-400">Organise images in sub-folders by class:</p>
-                    <p class="text-xs text-gray-500 mt-1">dataset.zip → cats/ dogs/ etc.</p>
+            <!-- ── Photo / Image upload area (auto-detects ZIP vs images) ── -->
+            <div id="photoUploadArea" class="hidden">
+                <label for="photoFileInput" class="upload-zone upload-zone-img block p-8 rounded-xl cursor-pointer text-center">
+                    <div class="text-5xl mb-3">🖼️</div>
+                    <p class="text-lg font-semibold mb-2">Select photos or a ZIP dataset</p>
+                    <p class="text-sm text-gray-400 mb-1">
+                        <span class="text-pink-400 font-semibold">ZIP file</span> — folder per class (cats/, dogs/, …)
+                    </p>
+                    <p class="text-sm text-gray-400">
+                        <span class="text-blue-400 font-semibold">Image files</span> — JPG / PNG / BMP / TIFF / WEBP (single or multiple)
+                    </p>
+                    <p class="text-xs text-gray-500 mt-2">Auto-detected — just pick your files</p>
                 </label>
-                <input type="file" id="imageFileInput" accept=".zip" onchange="handleImageUpload(event)">
+                <!-- Accept both ZIP and image types; multiple allows multi-select -->
+                <input type="file" id="photoFileInput" accept=".zip,.jpg,.jpeg,.png,.bmp,.tiff,.webp,.gif" multiple onchange="handlePhotoUpload(event)">
+                <div id="photoPreviewBar" class="hidden mt-3 text-sm text-gray-400 text-center"></div>
             </div>
 
             <div id="uploadProgress" class="hidden mt-6">
                 <div class="flex items-center justify-center space-x-3">
                     <div class="loader"></div>
-                    <span class="text-sm" id="uploadProgressText">Processing your dataset...</span>
+                    <span class="text-sm" id="uploadProgressText">Processing your data…</span>
                 </div>
             </div>
             <button onclick="closeUploadModal()" class="mt-6 w-full py-3 rounded-lg bg-white/5 hover:bg-white/10 font-semibold">Cancel</button>
@@ -173,28 +240,22 @@
     <script>
         // API Configuration
         let API_BASE = window.location.origin;
-        
+
         if (window.location.protocol === 'file:') {
             API_BASE = 'http://localhost:8000';
-            console.warn('File opened directly. Defaulting API to:', API_BASE);
-        }
-        else if (window.location.port && ['3000', '5173', '8080', '4200'].includes(window.location.port)) {
+        } else if (window.location.port && ['3000','5173','8080','4200'].includes(window.location.port)) {
             API_BASE = `http://${window.location.hostname}:8000`;
-            console.log('Frontend dev server detected. API base set to:', API_BASE);
         }
-        
+
         const savedApiBase = localStorage.getItem('API_BASE');
-        if (savedApiBase) {
-            API_BASE = savedApiBase;
-            console.log('Using saved API base:', API_BASE);
-        }
-        
-        console.log('API Base URL:', API_BASE);
-        
+        if (savedApiBase) API_BASE = savedApiBase;
+
         let currentDatasetId = null;
         let allDatasets = [];
+        let datasets_meta = {};  // stores image dataset metadata (stats, previews, etc.)
+        let mlBenchmarkCache = {};
         let chatHistory = [];
-        let chatMessages = []; // Store chat messages for session persistence
+        let chatMessages = [];
         let explorerPagination = { page: 1, pageSize: 50, totalPages: 1 };
         let queryPagination = { page: 1, pageSize: 50, totalPages: 1 };
 
@@ -211,49 +272,72 @@
 
         function updateDatasetSwitcher() {
             const container = document.getElementById('datasetList');
+            const wrapper = document.getElementById('datasetSwitcherWrapper');
             if (!allDatasets.length) {
-                container.innerHTML = '<p class="text-gray-400 text-sm">No datasets uploaded</p>';
+                wrapper.classList.add('hidden');
                 return;
             }
-            
-            container.innerHTML = allDatasets.map(ds => `
-                <div onclick="switchDataset('${ds.id}')" 
-                     class="dataset-pill ${ds.id === currentDatasetId ? 'active' : 'bg-white/5'} px-6 py-3 rounded-lg flex items-center space-x-2 whitespace-nowrap cursor-pointer transition-all">
-                    <span class="text-xl">📊</span>
-                    <div class="flex-1 min-w-0">
-                        <div class="font-semibold truncate">${ds.filename}</div>
-                        <div class="text-xs text-gray-400">${ds.rows.toLocaleString()} rows • ${ds.columns} cols</div>
+            wrapper.classList.remove('hidden');
+            container.innerHTML = allDatasets.map(ds => {
+                const isImg = ['image','single_image','multi_image'].includes(ds.dataset_type || '');
+                const isActive = ds.id === currentDatasetId;
+                const pill = isActive ? (isImg ? 'active-img' : 'active') : 'bg-white/5';
+                const icon = isImg ? '🖼️' : '📊';
+                const sub = isImg
+                    ? `${ds.rows.toLocaleString()} images • ${ds.columns} classes`
+                    : `${ds.rows.toLocaleString()} rows • ${ds.columns} cols`;
+                return `<div onclick="switchDataset('${ds.id}')"
+                     class="dataset-pill ${pill} px-5 py-2.5 rounded-xl flex items-center gap-2 whitespace-nowrap cursor-pointer transition-all">
+                    <span class="text-lg">${icon}</span>
+                    <div class="min-w-0">
+                        <div class="font-semibold text-sm truncate max-w-xs">${ds.filename}</div>
+                        <div class="text-xs text-gray-400">${sub}</div>
                     </div>
-                    <button onclick="deleteDataset(event, '${ds.id}')" class="ml-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 px-2 py-1 rounded transition">✕</button>
-                </div>
-            `).join('');
+                    <button onclick="deleteDataset(event,'${ds.id}')" class="ml-1 text-red-400 hover:text-red-300 hover:bg-red-500/20 px-1.5 py-0.5 rounded text-xs transition">✕</button>
+                </div>`;
+            }).join('');
         }
 
         async function switchDataset(datasetId) {
             currentDatasetId = datasetId;
             chatHistory = [];
-            chatMessages = []; // Clear chat messages when switching dataset
+            chatMessages = [];
             explorerPagination = { page: 1, pageSize: 50, totalPages: 1 };
             queryPagination = { page: 1, pageSize: 50, totalPages: 1 };
-            
+
             try {
                 const response = await fetch(`${API_BASE}/api/dataset/${datasetId}`);
                 const data = await response.json();
 
-                const isImageDs = data.eda && data.eda.dataset_type === 'image';
+                const dsType = (data.eda && data.eda.dataset_type) || '';
+                const isImage = ['image', 'single_image', 'multi_image'].includes(dsType);
 
-                document.getElementById('statRows').textContent = isImageDs
-                    ? (data.eda && data.eda.columns ? '—' : '—')
-                    : data.rows.toLocaleString();
-                document.getElementById('statColumns').textContent = isImageDs ? '—' : data.columns;
-                document.getElementById('statDataset').textContent = data.filename;
-                
                 updateDatasetSwitcher();
-                loadHealthScore();
 
-                if (isImageDs) {
-                    switchTab('image_analysis');
+                // Show correct dashboard
+                document.getElementById('welcomeScreen').classList.add('hidden');
+                document.getElementById('dashboard').classList.toggle('hidden', isImage);
+                document.getElementById('imageDashboard').classList.toggle('hidden', !isImage);
+
+                if (isImage) {
+                    // Populate image stats bar
+                    const stats = (datasets_meta[datasetId] && datasets_meta[datasetId].stats) || {};
+                    document.getElementById('imgStatTotal').textContent =
+                        stats.total_images ?? (dsType === 'single_image' ? 1 : '—');
+                    document.getElementById('imgStatClasses').textContent =
+                        stats.num_classes ?? '—';
+                    document.getElementById('imgStatDims').textContent =
+                        (stats.avg_width && stats.avg_height)
+                            ? `${stats.avg_width}×${stats.avg_height}px`
+                            : (stats.width && stats.height ? `${stats.width}×${stats.height}px` : '—');
+                    document.getElementById('imgStatFile').textContent =
+                        data.filename || '—';
+                    switchImgTab('img_overview');
                 } else {
+                    document.getElementById('statRows').textContent = data.rows.toLocaleString();
+                    document.getElementById('statColumns').textContent = data.columns;
+                    document.getElementById('statDataset').textContent = data.filename;
+                    loadHealthScore();
                     switchTab('overview');
                 }
             } catch (error) {
@@ -265,17 +349,19 @@
         async function deleteDataset(event, datasetId) {
             event.stopPropagation();
             if (!confirm('Delete this dataset?')) return;
-            
             try {
                 await fetch(`${API_BASE}/api/dataset/${datasetId}`, { method: 'DELETE' });
                 allDatasets = allDatasets.filter(ds => ds.id !== datasetId);
-                
+                delete datasets_meta[datasetId];
                 if (datasetId === currentDatasetId) {
+                    currentDatasetId = null;
                     if (allDatasets.length > 0) {
                         await switchDataset(allDatasets[0].id);
                     } else {
                         document.getElementById('welcomeScreen').classList.remove('hidden');
                         document.getElementById('dashboard').classList.add('hidden');
+                        document.getElementById('imageDashboard').classList.add('hidden');
+                        document.getElementById('datasetSwitcherWrapper').classList.add('hidden');
                     }
                 }
                 updateDatasetSwitcher();
@@ -284,156 +370,154 @@
             }
         }
 
-        function showUploadModal() {
+        function showUploadModal(mode) {
             document.getElementById('uploadModal').classList.remove('hidden');
+            setUploadMode(mode || 'tabular');
         }
 
         function closeUploadModal() {
             document.getElementById('uploadModal').classList.add('hidden');
         }
 
+        function setUploadMode(mode) {
+            // Toggle areas
+            document.getElementById('tabularUploadArea').classList.toggle('hidden', mode !== 'tabular');
+            document.getElementById('photoUploadArea').classList.toggle('hidden', mode !== 'photo');
+            // Toggle button styles
+            const tabBtn   = document.getElementById('uploadModeTabular');
+            const photoBtn = document.getElementById('uploadModePhoto');
+            tabBtn.classList.toggle('tab-active', mode === 'tabular');
+            tabBtn.classList.toggle('bg-white/5', mode !== 'tabular');
+            tabBtn.classList.toggle('border', mode !== 'tabular');
+            tabBtn.classList.toggle('border-white/10', mode !== 'tabular');
+            photoBtn.classList.toggle('tab-active-img', mode === 'photo');
+            photoBtn.classList.toggle('bg-white/5', mode !== 'photo');
+            photoBtn.classList.toggle('border', mode !== 'photo');
+            photoBtn.classList.toggle('border-white/10', mode !== 'photo');
+        }
+
+        // ── Tabular file upload ──────────────────────────────────────────────
         async function handleFileUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
-
-            const fileExtension = file.name.toLowerCase().split('.').pop();
-            if (!['csv', 'xlsx'].includes(fileExtension)) {
-                alert('Please upload a CSV or XLSX file');
+            const ext = file.name.toLowerCase().split('.').pop();
+            if (!['csv','xlsx','xls','json'].includes(ext)) {
+                alert('Please upload a CSV, XLSX, or JSON file');
                 event.target.value = '';
                 return;
             }
-
             const formData = new FormData();
             formData.append('file', file);
-
-            document.getElementById('uploadProgress').classList.remove('hidden');
-
+            const prog = document.getElementById('uploadProgress');
+            const progTxt = document.getElementById('uploadProgressText');
+            prog.classList.remove('hidden');
+            progTxt.textContent = 'Cleaning & analysing dataset…';
             try {
-                const response = await fetch(`${API_BASE}/api/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
-
+                const response = await fetch(`${API_BASE}/api/upload`, { method:'POST', body: formData });
                 if (!response.ok) {
-                    let errorMessage = 'Unknown error';
-                    try {
-                        const errorData = await response.json();
-                        errorMessage = errorData.detail || errorData.message || `HTTP ${response.status}: ${response.statusText}`;
-                    } catch (e) {
-                        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
-                    }
-                    throw new Error(errorMessage);
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || err.message || `HTTP ${response.status}`);
                 }
-
                 const data = await response.json();
-                
-                    await loadDatasets();
+                allDatasets.push({ id: data.dataset_id, filename: data.filename, rows: data.rows, columns: data.columns });
                 currentDatasetId = data.dataset_id;
-                await switchDataset(data.dataset_id);
-                    
-                    document.getElementById('welcomeScreen').classList.add('hidden');
-                    document.getElementById('dashboard').classList.remove('hidden');
-                    
-                    closeUploadModal();
-                    switchTab('overview');
-            } catch (error) {
-                console.error('Upload error:', error);
-                let errorMsg = error.message || 'Failed to upload file';
-                
-                if (error.message === 'Failed to fetch' || error.message.includes('fetch')) {
-                    errorMsg = `Cannot connect to backend server at ${API_BASE}.\n\n` +
-                              'Please ensure:\n' +
-                              '1. Backend server is running (python main.py)\n' +
-                              '2. Server is running on port 8000\n' +
-                              '3. Check browser console (F12) for details';
-                }
-                
-                alert('Upload failed: ' + errorMsg);
-            } finally {
-                document.getElementById('uploadProgress').classList.add('hidden');
-                event.target.value = '';
-            }
-        }
-
-        function setUploadMode(mode) {
-            const tabular = document.getElementById('tabularUploadArea');
-            const image = document.getElementById('imageUploadArea');
-            const btnTabular = document.getElementById('uploadModeTabular');
-            const btnImage = document.getElementById('uploadModeImage');
-            if (mode === 'tabular') {
-                tabular.classList.remove('hidden');
-                image.classList.add('hidden');
-                btnTabular.classList.add('tab-active');
-                btnTabular.classList.remove('bg-white/5');
-                btnImage.classList.remove('tab-active');
-                btnImage.classList.add('bg-white/5');
-            } else {
-                tabular.classList.add('hidden');
-                image.classList.remove('hidden');
-                btnImage.classList.add('tab-active');
-                btnImage.classList.remove('bg-white/5');
-                btnTabular.classList.remove('tab-active');
-                btnTabular.classList.add('bg-white/5');
-            }
-        }
-
-        async function handleImageUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            if (!file.name.toLowerCase().endsWith('.zip')) {
-                alert('Please upload a ZIP file containing your image dataset.');
-                event.target.value = '';
-                return;
-            }
-
-            const formData = new FormData();
-            formData.append('file', file);
-
-            const progressEl = document.getElementById('uploadProgress');
-            const progressText = document.getElementById('uploadProgressText');
-            progressEl.classList.remove('hidden');
-            if (progressText) progressText.textContent = 'Processing image dataset…';
-
-            try {
-                const response = await fetch(`${API_BASE}/api/upload-images`, {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    let msg = 'Unknown error';
-                    try { const err = await response.json(); msg = err.detail || err.message || msg; } catch (e) {}
-                    throw new Error(msg);
-                }
-
-                const data = await response.json();
-                await loadDatasets();
-                currentDatasetId = data.dataset_id;
-
-                // Manually add to allDatasets list since image datasets are stored separately
-                if (!allDatasets.find(d => d.id === data.dataset_id)) {
-                    allDatasets.push({
-                        id: data.dataset_id,
-                        filename: data.filename,
-                        rows: data.stats.total_images,
-                        columns: data.stats.num_classes
-                    });
-                    updateDatasetSwitcher();
-                }
-
+                updateDatasetSwitcher();
+                document.getElementById('datasetSwitcherWrapper').classList.remove('hidden');
                 document.getElementById('welcomeScreen').classList.add('hidden');
+                document.getElementById('imageDashboard').classList.add('hidden');
                 document.getElementById('dashboard').classList.remove('hidden');
                 closeUploadModal();
-                // Go to predictive tab which will detect image dataset and show image analysis
-                switchTab('predictive');
+                document.getElementById('statRows').textContent = data.rows.toLocaleString();
+                document.getElementById('statColumns').textContent = data.columns;
+                document.getElementById('statDataset').textContent = data.filename;
+                loadHealthScore();
+                switchTab('overview');
             } catch (error) {
-                console.error('Image upload error:', error);
-                alert('Image upload failed: ' + (error.message || 'Unknown error'));
+                let msg = error.message || 'Upload failed';
+                if (msg.includes('fetch')) msg = `Cannot reach backend at ${API_BASE}. Is server running?`;
+                alert('Upload failed: ' + msg);
             } finally {
-                progressEl.classList.add('hidden');
-                if (progressText) progressText.textContent = 'Processing your dataset…';
+                prog.classList.add('hidden');
                 event.target.value = '';
             }
+        }
+
+        // ── Unified photo upload (auto-detects ZIP vs image files) ───────────
+        async function handlePhotoUpload(event) {
+            const files = Array.from(event.target.files);
+            if (!files.length) return;
+
+            const prog = document.getElementById('uploadProgress');
+            const progTxt = document.getElementById('uploadProgressText');
+            const previewBar = document.getElementById('photoPreviewBar');
+            prog.classList.remove('hidden');
+
+            // Detect: if first file is a ZIP → use ZIP upload endpoint
+            const firstFile = files[0];
+            const isZip = firstFile.name.toLowerCase().endsWith('.zip');
+
+            try {
+                let data;
+                if (isZip) {
+                    // ZIP dataset upload
+                    progTxt.textContent = 'Extracting & analysing image ZIP dataset…';
+                    const formData = new FormData();
+                    formData.append('file', firstFile);
+                    const resp = await fetch(`${API_BASE}/api/upload-images`, { method:'POST', body: formData });
+                    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'ZIP upload failed'); }
+                    data = await resp.json();
+                    _registerImageDataset(data, 'image');
+                } else if (files.length === 1) {
+                    // Single image
+                    progTxt.textContent = 'Analysing image & generating augmentation previews…';
+                    const formData = new FormData();
+                    formData.append('file', firstFile);
+                    const resp = await fetch(`${API_BASE}/api/upload-single-image`, { method:'POST', body: formData });
+                    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Upload failed'); }
+                    data = await resp.json();
+                    _registerImageDataset(data, 'single_image');
+                } else {
+                    // Multiple image files
+                    progTxt.textContent = `Uploading & analysing ${files.length} image files…`;
+                    if (previewBar) { previewBar.classList.remove('hidden'); previewBar.textContent = `${files.length} files selected…`; }
+                    const formData = new FormData();
+                    files.forEach(f => formData.append('files', f));
+                    const resp = await fetch(`${API_BASE}/api/upload-multiple-images`, { method:'POST', body: formData });
+                    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.detail || 'Upload failed'); }
+                    data = await resp.json();
+                    _registerImageDataset(data, 'multi_image');
+                }
+                closeUploadModal();
+            } catch (error) {
+                alert('Photo upload failed: ' + (error.message || 'Unknown error'));
+            } finally {
+                prog.classList.add('hidden');
+                if (previewBar) previewBar.classList.add('hidden');
+                event.target.value = '';
+            }
+        }
+
+        // Helper: register an image dataset and show image dashboard
+        function _registerImageDataset(data, dsType) {
+            const id = data.dataset_id;
+            const stats = data.stats || {};
+            const totalImgs = stats.total_images || data.total_images || 1;
+            datasets_meta[id] = { stats, augmentations: data.augmentation_suggestions || [], commentary: data.ai_commentary || '', previews: data.augmentation_previews || [], dsType };
+            if (!allDatasets.find(d => d.id === id)) {
+                allDatasets.push({ id, filename: data.filename, rows: totalImgs, columns: stats.num_classes || 0, dataset_type: dsType });
+            }
+            currentDatasetId = id;
+            updateDatasetSwitcher();
+            document.getElementById('datasetSwitcherWrapper').classList.remove('hidden');
+            document.getElementById('welcomeScreen').classList.add('hidden');
+            document.getElementById('dashboard').classList.add('hidden');
+            document.getElementById('imageDashboard').classList.remove('hidden');
+            // Fill stats bar
+            document.getElementById('imgStatTotal').textContent = totalImgs;
+            document.getElementById('imgStatClasses').textContent = stats.num_classes || (dsType === 'single_image' ? 1 : '—');
+            document.getElementById('imgStatDims').textContent = stats.avg_width ? `${stats.avg_width}×${stats.avg_height}px` : (stats.width ? `${stats.width}×${stats.height}px` : '—');
+            document.getElementById('imgStatFile').textContent = data.filename;
+            switchImgTab('img_overview');
         }
 
         async function loadHealthScore() {
@@ -483,17 +567,37 @@
             content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
 
             switch(tabName) {
-                case 'overview': loadOverview(); break;
-                case 'numerical': loadNumerical(); break;
-                case 'categorical': loadCategorical(); break;
+                case 'overview':     loadOverview(); break;
+                case 'numerical':    loadNumerical(); break;
+                case 'categorical':  loadCategorical(); break;
                 case 'correlations': loadCorrelations(); break;
-                case 'outliers': loadOutliers(); break;
-                case 'timeseries': loadTimeSeries(); break;
-                case 'insights': loadInsights(); break;
-                case 'predictive': loadPredictive(); break;
-                case 'image_analysis': loadImageAnalysis(); break;
-                case 'chat': loadChat(); break;
-                case 'explorer': loadExplorer(); break;
+                case 'outliers':     loadOutliers(); break;
+                case 'timeseries':   loadTimeSeries(); break;
+                case 'insights':     loadInsights(); break;
+                case 'ml_advisor':   loadMLAdvisor(); break;
+                case 'chat':         loadChat(); break;
+                case 'explorer':     loadExplorer(); break;
+            }
+        }
+
+        // ══ Image Dashboard Tab Switcher ══════════════════════════════════════
+        function switchImgTab(tabName) {
+            document.querySelectorAll('[id^="imgtab-"]').forEach(btn => {
+                btn.classList.remove('tab-active-img');
+                btn.classList.add('img-tab-btn');
+            });
+            const tabEl = document.getElementById(`imgtab-${tabName}`);
+            if (tabEl) { tabEl.classList.add('tab-active-img'); }
+
+            const content = document.getElementById('imgTabContent');
+            content.innerHTML = '<div class="flex justify-center py-20"><div class="loader-pink"></div></div>';
+
+            switch(tabName) {
+                case 'img_overview':  loadImgOverview(); break;
+                case 'img_insights':  loadImgAIInsights(); break;
+                case 'img_augment':   loadImgAugmentSuggestions(); break;
+                case 'img_previews':  loadImgPreviews(); break;
+                case 'img_ml':        loadImgVisionModels(); break;
             }
         }
 
@@ -925,7 +1029,14 @@
 
                 const response = await fetch(`${API_BASE}/api/insights/${currentDatasetId}`);
                 if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
+                    let details = `HTTP ${response.status}`;
+                    try {
+                        const err = await response.json();
+                        if (err && err.detail) {
+                            details = err.detail;
+                        }
+                    } catch (_) {}
+                    throw new Error(details);
                 }
                 const data = await response.json();
                 
@@ -1222,299 +1333,552 @@
             }
         }
 
-        async function loadPredictive() {
-            const content = document.getElementById('tabContent');
-            content.innerHTML = '<div class="flex justify-center py-20"><div class="loader"></div></div>';
+        // ══ ML Advisor Tab (replaces old Model Suggest) ═════════════════════
+        // Calls /api/ml-recommendations which uses Llama 3.1 via Ollama to reason
+        // about which ML algorithm best fits the dataset's size, task type, and feature profile.
+        function buildMLBenchmarkSection(benchmark) {
+            if (benchmark && benchmark.available) {
+                const bmRows = (benchmark.models || []).map((m) => {
+                    if (m.error) {
+                        return `<tr class="border-b border-white/5"><td class="py-2 px-3 text-red-300" colspan="8">${m.model}: ${m.error}</td></tr>`;
+                    }
+                    const metrics = benchmark.task === 'classification'
+                        ? [m.accuracy, m.precision_macro, m.recall_macro, m.f1_macro, m.cv_f1_mean, m.cv_f1_std, `${m.stability}%`]
+                            : [
+                                m.adj_r_square ?? '—',
+                                m.mean_absolute_error_mae ?? m.mae ?? '—',
+                                m.root_mean_squared_error_rmse ?? m.rmse ?? '—',
+                                m.mean_absolute_percentage_error_mape ?? m.mape ?? '—',
+                                m.mean_squared_error_mse ?? '—',
+                                m.root_mean_squared_log_error_rmsle ?? '—',
+                                m.r2_score ?? m.r2 ?? '—',
+                            ];
+                    return `<tr class="border-b border-white/5 ${m.is_best ? 'bg-yellow-500/10' : ''}">
+                        <td class="py-2 px-3 font-semibold">${m.model} ${m.is_best ? '👑' : ''}</td>
+                        ${metrics.map(v => `<td class="py-2 px-3 text-xs">${v}</td>`).join('')}
+                    </tr>`;
+                }).join('');
 
-            try {
-                if (!currentDatasetId) {
-                    content.innerHTML = '<p class="text-red-400">Please select a dataset first</p>';
-                    return;
-                }
+                const headerCols = benchmark.task === 'classification'
+                    ? ['Accuracy', 'Precision', 'Recall', 'F1', 'CV F1', 'CV STD', 'Stability']
+                        : ['Adj_R_Square', 'MAE', 'RMSE', 'MAPE', 'MSE', 'RMSLE', 'R2_score'];
 
-                const response = await fetch(`${API_BASE}/api/dataset/${currentDatasetId}`);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const data = await response.json();
-
-                // Check if it is an image dataset
-                if (data.eda && data.eda.dataset_type === 'image') {
-                    await loadImageAnalysis();
-                    return;
-                }
-
-                const cols = data.eda && data.eda.columns ? Object.keys(data.eda.columns) : [];
-                const profileTargets = data.profile && data.profile.candidate_targets ? data.profile.candidate_targets : [];
-                const options = cols.map(c => `<option value="${c}">${c}</option>`).join('');
-                const suggested = profileTargets.length
-                    ? `🎯 AI-suggested targets: <span class="text-purple-300 font-semibold">${profileTargets.slice(0, 5).join(', ')}</span>`
-                    : 'No target suggestions available';
-
-                content.innerHTML = `
-                    <h2 class="text-3xl font-bold mb-2 gradient-text">🤖 AutoML Predictive Analysis</h2>
-                    <p class="text-gray-400 mb-6 text-sm">Runs 5–6 models in parallel, cross-validates each, and recommends the best one automatically.</p>
-
-                    <div class="glass-card p-6 rounded-xl mb-6">
-                        <h3 class="text-lg font-semibold mb-3">Target Column Selection</h3>
-                        <p class="text-sm text-gray-400 mb-3">${suggested}</p>
-                        <div class="flex flex-col md:flex-row md:items-center gap-4">
-                            <select id="predictTarget" class="bg-white/5 border border-white/10 rounded-xl px-4 py-3 flex-1">
-                                <option value="">Auto-detect target</option>
-                                ${options}
-                            </select>
-                            <button onclick="runPredictive()" class="gradient-button px-8 py-3 rounded-xl font-semibold flex items-center gap-2">
-                                <span>⚡</span> Run AutoML
-                            </button>
+                return `
+                    <div class="glass-card p-5 rounded-xl mb-8" id="mlBenchmarkSection">
+                        <div class="flex items-center justify-between gap-3 mb-2">
+                            <h3 class="text-xl font-bold">🧪 Applied Model Benchmark</h3>
+                            <button onclick="runFullBenchmark(true)" class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold">↻ Re-run Benchmark</button>
                         </div>
-                    </div>
-
-                    <div id="predictiveResults" class="space-y-6">
-                        <div class="glass-card p-6 rounded-xl text-center text-gray-400 py-12">
-                            Select a target column (or use Auto-detect) and click <strong>Run AutoML</strong>.
+                        <p class="text-xs text-gray-400 mb-4">Target: <span class="text-purple-300 font-semibold">${benchmark.target_column}</span> · Train ${benchmark.train_size?.toLocaleString()} / Test ${benchmark.test_size?.toLocaleString()}</p>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="border-b border-white/10 text-gray-400">
+                                        <th class="text-left py-2 px-3">Model</th>
+                                        ${headerCols.map(h => `<th class="text-left py-2 px-3">${h}</th>`).join('')}
+                                    </tr>
+                                </thead>
+                                <tbody>${bmRows}</tbody>
+                            </table>
                         </div>
-                    </div>
-                `;
-            } catch (error) {
-                console.error('Predictive load error:', error);
-                document.getElementById('tabContent').innerHTML = `
-                    <div class="text-center py-12">
-                        <p class="text-red-400 text-lg mb-2">Failed to load predictive analysis</p>
-                        <p class="text-gray-400 text-sm">${error.message}</p>
+                            <p class="text-xs text-gray-500 mt-3">Best model by cross-validation: <span class="text-yellow-300 font-semibold">${benchmark.best_model || 'N/A'}</span></p>
+                            ${benchmark.researcher_summary ? `<div class="mt-4 p-3 rounded-lg bg-purple-500/10 border border-purple-500/30 text-sm text-gray-200 leading-relaxed"><span class="font-semibold text-purple-300">Researcher Note:</span> ${benchmark.researcher_summary}</div>` : ''}
                     </div>`;
             }
+
+            if (benchmark && benchmark.reason) {
+                return `<div id="mlBenchmarkSection" class="glass-card p-4 rounded-xl mb-8 text-yellow-200 text-sm">Benchmark not available: ${benchmark.reason}</div>`;
+            }
+
+            return `
+                <div id="mlBenchmarkSection" class="glass-card p-5 rounded-xl mb-8 border border-white/10">
+                    <div class="flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                            <h3 class="text-lg font-bold mb-1">🧪 Applied Model Benchmark</h3>
+                            <p class="text-xs text-gray-400">Runs training + evaluation for recommended algorithms and compares all metrics.</p>
+                        </div>
+                        <button id="runBenchmarkBtn" onclick="runFullBenchmark(false)" class="gradient-button px-4 py-2 rounded-lg text-sm font-semibold">Run Full Benchmark</button>
+                    </div>
+                </div>`;
         }
 
-        async function runPredictive() {
-            if (!currentDatasetId) { alert('Please select a dataset first'); return; }
+        async function runFullBenchmark(forceRun = false) {
+            if (!currentDatasetId) return;
+            const section = document.getElementById('mlBenchmarkSection');
+            if (!section) return;
 
-            const target = document.getElementById('predictTarget').value;
-            const resultsDiv = document.getElementById('predictiveResults');
-            resultsDiv.innerHTML = `
-                <div class="glass-card p-8 rounded-xl text-center">
-                    <div class="flex justify-center mb-4"><div class="loader"></div></div>
-                    <p class="text-gray-300 font-semibold">AutoML Tournament in progress…</p>
-                    <p class="text-gray-500 text-sm mt-1">Training &amp; cross-validating multiple models. This may take 20–60 seconds.</p>
+            section.innerHTML = `
+                <div class="flex items-center gap-3 py-4">
+                    <div class="loader" style="width:24px;height:24px;border-width:2px"></div>
+                    <div>
+                        <p class="text-sm font-semibold text-purple-300">Running full benchmark...</p>
+                        <p class="text-xs text-gray-400">Training and evaluating multiple algorithms. This may take 20-90 seconds.</p>
+                    </div>
                 </div>`;
 
             try {
-                const response = await fetch(`${API_BASE}/api/predictive`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ dataset_id: currentDatasetId, target_column: target || null })
-                });
-                const data = await response.json();
-                if (!response.ok || !data.success) throw new Error(data.detail || data.message || `HTTP ${response.status}`);
-
-                const isRegression = data.task === 'regression';
-                const bm = data.best_metrics || {};
-                const comparison = data.model_comparison || [];
-                const warnings = data.warnings || [];
-
-                // ── Header ─────────────────────────────────────────────────────
-                let html = `
-                    <div class="glass-card p-6 rounded-xl">
-                        <div class="flex flex-wrap items-start justify-between gap-4 mb-4">
-                            <div>
-                                <h3 class="text-2xl font-bold gradient-text">${isRegression ? '📈 Regression' : '🏆 Classification'} Results</h3>
-                                <p class="text-gray-400 text-sm mt-1">Target: <span class="text-gray-200 font-semibold">${data.target_column}</span>
-                                    &nbsp;|&nbsp; Best model: <span class="text-yellow-300 font-semibold">${data.best_model}</span>
-                                    &nbsp;|&nbsp; Train: ${data.train_size.toLocaleString()} / Test: ${data.test_size.toLocaleString()} rows
-                                </p>
-                            </div>
-                            ${!isRegression ? `<div class="text-xs text-gray-500">${data.num_classes} classes</div>` : ''}
-                        </div>`;
-
-                // ── Metric badges ───────────────────────────────────────────────
-                if (isRegression) {
-                    html += `
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">R² Score</div><div class="text-2xl font-bold text-green-400">${bm.r2 ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">RMSE</div><div class="text-2xl font-bold">${bm.rmse ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">MAE</div><div class="text-2xl font-bold">${bm.mae ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">CV R² Stability</div><div class="text-2xl font-bold text-purple-400">${bm.stability ?? '—'}%</div></div>
-                        </div>`;
-                } else {
-                    html += `
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">Test Accuracy</div><div class="text-2xl font-bold text-green-400">${bm.accuracy ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">F1 Macro</div><div class="text-2xl font-bold">${bm.f1_macro ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">CV F1 (mean)</div><div class="text-2xl font-bold text-purple-400">${bm.cv_f1_mean ?? '—'}</div></div>
-                            <div class="bg-white/5 p-4 rounded-xl text-center"><div class="text-xs text-gray-400 mb-1">Stability Score</div><div class="text-2xl font-bold text-yellow-400">${bm.stability ?? '—'}%</div></div>
-                        </div>`;
+                const url = `${API_BASE}/api/ml-benchmark/${currentDatasetId}${forceRun ? '?force=true' : ''}`;
+                const resp = await fetch(url, { method: 'POST' });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    section.innerHTML = `<div class="text-red-400 text-sm">${data.detail || 'Benchmark failed.'}</div>`;
+                    return;
                 }
-                html += `</div>`;
-
-                // ── Warnings ────────────────────────────────────────────────────
-                if (warnings.length) {
-                    html += `<div class="glass-card p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/30">
-                        <div class="text-yellow-300 font-semibold mb-1">⚠️ Notices</div>
-                        <ul class="text-sm text-yellow-200 space-y-1">${warnings.map(w => `<li>• ${w}</li>`).join('')}</ul>
-                    </div>`;
-                }
-
-                // ── AutoML Comparison Chart ─────────────────────────────────────
-                if (data.model_comparison_chart && data.model_comparison_chart.data) {
-                    html += `<div class="glass-card p-6 rounded-xl">
-                        <h4 class="text-lg font-semibold mb-4">⚡ AutoML Tournament — All Models</h4>
-                        <div id="modelCompChart"></div>
-                    </div>`;
-                }
-
-                // ── Model Comparison Table ──────────────────────────────────────
-                if (comparison.length) {
-                    const scoreKey = isRegression ? 'r2' : 'accuracy';
-                    const cvKey = isRegression ? 'cv_r2_mean' : 'cv_f1_mean';
-                    html += `<div class="glass-card p-6 rounded-xl">
-                        <h4 class="text-lg font-semibold mb-4">📋 Model Leaderboard</h4>
-                        <div class="overflow-x-auto">
-                            <table class="w-full text-sm">
-                                <thead><tr class="border-b border-white/10 text-gray-400">
-                                    <th class="text-left py-2 px-3">Model</th>
-                                    <th class="text-left py-2 px-3">${isRegression ? 'R²' : 'Accuracy'}</th>
-                                    <th class="text-left py-2 px-3">${isRegression ? 'RMSE' : 'F1 Macro'}</th>
-                                    <th class="text-left py-2 px-3">CV Score</th>
-                                    <th class="text-left py-2 px-3">Stability</th>
-                                    <th class="text-left py-2 px-3"></th>
-                                </tr></thead>
-                                <tbody>
-                                    ${comparison.map(r => `
-                                        <tr class="border-b border-white/5 ${r.is_best ? 'bg-yellow-500/10' : 'hover:bg-white/5'}">
-                                            <td class="py-2 px-3 font-semibold">${r.model}</td>
-                                            <td class="py-2 px-3">${r[scoreKey] ?? '<span class="text-red-400">failed</span>'}</td>
-                                            <td class="py-2 px-3">${isRegression ? (r.rmse ?? '—') : (r.f1_macro ?? '—')}</td>
-                                            <td class="py-2 px-3">${r[cvKey] ?? '—'}</td>
-                                            <td class="py-2 px-3">${r.stability != null ? r.stability + '%' : '—'}</td>
-                                            <td class="py-2 px-3">${r.is_best ? '<span class="text-yellow-400 font-bold">👑 Best</span>' : ''}</td>
-                                        </tr>`).join('')}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>`;
-                }
-
-                // ── Feature Importance Chart ────────────────────────────────────
-                if (data.feature_importance_chart && data.feature_importance_chart.data) {
-                    html += `<div class="glass-card p-6 rounded-xl">
-                        <h4 class="text-lg font-semibold mb-4">🔬 Feature Importances — ${data.best_model}</h4>
-                        <div id="featureImpChart"></div>
-                    </div>`;
-                }
-
-                // ── Confusion Matrix ────────────────────────────────────────────
-                const conf = data.confusion_matrix || [];
-                const classes = data.classes || [];
-                if (!isRegression && conf.length && classes.length) {
-                    html += `<div class="glass-card p-6 rounded-xl">
-                        <h4 class="text-lg font-semibold mb-4">🧮 Confusion Matrix (Best Model)</h4>
-                        <div class="overflow-x-auto">
-                            <table class="text-sm">
-                                <thead><tr><th class="py-2 px-3 text-left">Actual \\ Predicted</th>${classes.map(c=>`<th class="py-2 px-3">${c}</th>`).join('')}</tr></thead>
-                                <tbody>${conf.map((row, i) => `<tr class="border-b border-white/5"><td class="py-2 px-3 font-semibold">${classes[i]}</td>${row.map((v,j) => `<td class="py-2 px-3 ${i===j?'bg-green-500/20 font-bold':''}">${v}</td>`).join('')}</tr>`).join('')}</tbody>
-                            </table>
-                        </div>
-                    </div>`;
-                }
-
-                resultsDiv.innerHTML = html;
-
-                // Render Plotly charts after DOM update
-                setTimeout(() => {
-                    if (data.model_comparison_chart && data.model_comparison_chart.data) {
-                        try { Plotly.newPlot('modelCompChart', data.model_comparison_chart.data, data.model_comparison_chart.layout || {}); } catch(e){}
-                    }
-                    if (data.feature_importance_chart && data.feature_importance_chart.data) {
-                        try { Plotly.newPlot('featureImpChart', data.feature_importance_chart.data, data.feature_importance_chart.layout || {}); } catch(e){}
-                    }
-                }, 200);
-
+                mlBenchmarkCache[currentDatasetId] = data;
+                section.outerHTML = buildMLBenchmarkSection(data);
             } catch (error) {
-                console.error('Predictive error:', error);
-                resultsDiv.innerHTML = `<div class="glass-card p-6 rounded-xl text-center text-red-400 py-8">Error: ${error.message}</div>`;
+                section.innerHTML = `<div class="text-red-400 text-sm">Benchmark failed: ${error.message}</div>`;
             }
         }
 
-        async function loadImageAnalysis() {
+        async function loadMLAdvisor() {
             const content = document.getElementById('tabContent');
+            if (!currentDatasetId) {
+                content.innerHTML = '<p class="text-gray-400 text-center py-12">Please select a dataset first.</p>';
+                return;
+            }
+            content.innerHTML = '<div class="flex flex-col items-center py-20 gap-4"><div class="loader"></div><p class="text-gray-400 text-sm">Llama 3.1 is analysing your dataset…</p></div>';
             try {
-                const augResp = await fetch(`${API_BASE}/api/augmentation/${currentDatasetId}`);
-                if (!augResp.ok) throw new Error(`HTTP ${augResp.status}`);
-                const aug = await augResp.json();
-                const stats = aug.stats || {};
-                const suggestions = aug.suggestions || [];
-                const priorityColor = { 'High': 'text-red-400', 'Medium': 'text-yellow-400', 'Low': 'text-green-400' };
-                const classDist = stats.class_distribution || {};
-                const classBars = Object.entries(classDist).slice(0, 20).map(([cls, cnt]) => `
-                    <div class="flex items-center gap-3 py-1">
-                        <div class="w-28 text-sm truncate text-gray-300" title="${cls}">${cls}</div>
-                        <div class="flex-1 bg-white/5 rounded h-4 overflow-hidden">
-                            <div class="h-full bg-gradient-to-r from-purple-500 to-pink-500"
-                                style="width:${Math.round(cnt/Math.max(...Object.values(classDist))*100)}%"></div>
+                const resp = await fetch(`${API_BASE}/api/ml-recommendations/${currentDatasetId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    content.innerHTML = `<div class="text-center py-12 text-red-400">${err.detail || 'Failed to load recommendations.'}</div>`;
+                    return;
+                }
+                const d = await resp.json();
+                const taskColors = { classification:'text-purple-400', regression:'text-blue-400', clustering:'text-yellow-400' };
+                const complexityBadge = { Low:'bg-green-500/20 text-green-300', Medium:'bg-yellow-500/20 text-yellow-300', High:'bg-red-500/20 text-red-300' };
+
+                const modelCards = (d.recommendations || []).map((m, i) => `
+                    <div class="glass-card p-5 rounded-2xl border border-white/10 relative overflow-hidden">
+                        <div class="absolute top-3 right-3 text-2xl opacity-20">${i===0?'🥇':i===1?'🥈':'🥉'}</div>
+                        <div class="flex items-start justify-between mb-3">
+                            <div>
+                                <h3 class="text-lg font-bold">${m.name}</h3>
+                                <p class="text-xs text-gray-400 mt-1">${m.description}</p>
+                            </div>
+                            <span class="ml-3 px-2 py-0.5 rounded-full text-xs font-semibold ${complexityBadge[m.complexity]||''}">${m.complexity}</span>
                         </div>
-                        <div class="text-xs text-gray-400 w-10 text-right">${cnt}</div>
+                        <div class="text-xs text-green-400 font-semibold mb-1">✅ Pros</div>
+                        <ul class="space-y-0.5 mb-3">${(m.pros||[]).map(p=>`<li class="text-xs text-gray-300 flex gap-1.5"><span class="text-green-400">•</span>${p}</li>`).join('')}</ul>
+                        <div class="text-xs text-red-400 font-semibold mb-1">⚠️ Cons</div>
+                        <ul class="space-y-0.5 mb-3">${(m.cons||[]).map(c=>`<li class="text-xs text-gray-400 flex gap-1.5"><span class="text-red-400">•</span>${c}</li>`).join('')}</ul>
+                        <div class="text-xs bg-white/5 rounded-lg p-2 mt-1">
+                            <span class="text-gray-500">Best for:</span> <span class="text-gray-300">${m.best_for}</span>
+                        </div>
+                        <div class="text-xs text-purple-400 font-mono mt-2 bg-black/20 px-2 py-1 rounded">${m.sklearn||''}</div>
                     </div>`).join('');
 
+                const prepCards = (d.preprocessing_steps||[]).map(p=>`
+                    <div class="glass-card p-4 rounded-xl">
+                        <div class="font-semibold text-sm mb-1">${p.step}</div>
+                        <p class="text-xs text-gray-400">${p.reason}</p>
+                        <code class="text-xs text-green-400 font-mono">${p.code||''}</code>
+                    </div>`).join('');
+
+                const metricRows = (d.evaluation_metrics||[]).map(em=>`
+                    <div class="flex items-start gap-3 py-2 border-b border-white/5">
+                        <span class="font-semibold text-xs text-yellow-300 w-36 flex-shrink-0">${em.metric}</span>
+                        <span class="text-xs text-gray-400">${em.when}</span>
+                    </div>`).join('');
+
+                const benchmark = mlBenchmarkCache[currentDatasetId] || d.benchmark || null;
+                const benchmarkHtml = buildMLBenchmarkSection(benchmark);
+
                 content.innerHTML = `
-                    <h2 class="text-3xl font-bold mb-2 gradient-text">🖼️ Image Dataset Analysis</h2>
-                    <p class="text-gray-400 mb-6 text-sm">${aug.filename}</p>
-
-                    <!-- Stats grid -->
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                        <div class="glass-card p-5 rounded-xl text-center">
-                            <div class="text-xs text-gray-400 mb-1">Total Images</div>
-                            <div class="text-2xl font-bold text-purple-400">${stats.total_images?.toLocaleString() ?? 0}</div>
-                        </div>
-                        <div class="glass-card p-5 rounded-xl text-center">
-                            <div class="text-xs text-gray-400 mb-1">Classes</div>
-                            <div class="text-2xl font-bold text-pink-400">${stats.num_classes ?? 0}</div>
-                        </div>
-                        <div class="glass-card p-5 rounded-xl text-center">
-                            <div class="text-xs text-gray-400 mb-1">Avg Size</div>
-                            <div class="text-2xl font-bold">${stats.avg_width ?? 0} × ${stats.avg_height ?? 0}</div>
-                        </div>
-                        <div class="glass-card p-5 rounded-xl text-center">
-                            <div class="text-xs text-gray-400 mb-1">Imbalance Ratio</div>
-                            <div class="text-2xl font-bold ${stats.class_imbalance_ratio > 3 ? 'text-red-400' : 'text-green-400'}">${stats.class_imbalance_ratio ?? 1}×</div>
-                        </div>
+                    <h2 class="text-3xl font-bold mb-2 gradient-text">🤖 ML Algorithm Advisor</h2>
+                    <p class="text-gray-400 mb-5 text-sm">${d.dataset_size} &nbsp;|&nbsp; Detected task: <span class="${taskColors[d.task]||''} font-semibold">${(d.task||'').charAt(0).toUpperCase()+(d.task||'').slice(1)}</span></p>
+                    <div class="flex flex-wrap gap-2 mb-6">
+                        <span class="px-3 py-1.5 rounded-full glass-card text-xs">📐 ${d.n_rows?.toLocaleString()} rows</span>
+                        <span class="px-3 py-1.5 rounded-full glass-card text-xs">🔢 ${d.numeric_features} numeric</span>
+                        <span class="px-3 py-1.5 rounded-full glass-card text-xs">📚 ${d.categorical_features} categorical</span>
+                        ${(d.candidate_targets||[]).length?`<span class="px-3 py-1.5 rounded-full glass-card text-xs">🎯 Target: <span class="text-purple-300 font-semibold">${d.candidate_targets[0]}</span></span>`:''}
+                        ${d.is_imbalanced?`<span class="px-3 py-1.5 rounded-full bg-red-500/20 text-red-300 text-xs">⚠️ Class Imbalance</span>`:''}
                     </div>
-
-                    <!-- Class distribution -->
-                    ${classBars ? `
-                    <div class="glass-card p-6 rounded-xl mb-6">
-                        <h3 class="text-lg font-semibold mb-4">📊 Class Distribution</h3>
-                        <div class="space-y-1">${classBars}</div>
-                        ${Object.keys(classDist).length > 20 ? `<p class="text-xs text-gray-500 mt-2">Showing top 20 of ${Object.keys(classDist).length} classes.</p>` : ''}
-                    </div>` : ''}
-
-                    <!-- AI Commentary -->
-                    ${aug.ai_commentary ? `
-                    <div class="glass-card p-6 rounded-xl mb-6 bg-purple-500/10 border border-purple-500/30">
+                    ${d.ai_reasoning?`<div class="glass-card p-5 rounded-xl mb-6 bg-purple-500/10 border border-purple-500/30">
                         <div class="flex items-start gap-3">
                             <span class="text-2xl">🧠</span>
-                            <div>
-                                <h4 class="font-semibold text-purple-300 mb-2">AI Augmentation Strategy</h4>
-                                <p class="text-sm text-gray-300 leading-relaxed">${aug.ai_commentary}</p>
-                            </div>
-                        </div>
-                    </div>` : ''}
-
-                    <!-- Augmentation suggestions table -->
-                    <div class="glass-card p-6 rounded-xl">
-                        <h3 class="text-lg font-semibold mb-4">🔧 Recommended Augmentation Techniques</h3>
-                        <div class="space-y-3">
-                            ${suggestions.map(s => `
-                                <div class="bg-white/5 rounded-xl p-4 border border-white/10">
-                                    <div class="flex items-center justify-between mb-1">
-                                        <span class="font-semibold text-white">${s.technique}</span>
-                                        <span class="text-xs font-bold ${priorityColor[s.priority] || 'text-gray-400'}">${s.priority} Priority</span>
-                                    </div>
-                                    <p class="text-sm text-gray-400 mb-2">${s.reason}</p>
-                                    <code class="text-xs bg-black/30 px-2 py-1 rounded text-green-400">${s.code_hint}</code>
-                                </div>`).join('')}
-                        </div>
+                            <div><h4 class="font-semibold text-purple-300 mb-1">Llama 3.1 Reasoning</h4>
+                            <p class="text-sm text-gray-300 leading-relaxed">${d.ai_reasoning}</p></div>
+                        </div></div>`:''}
+                    ${benchmarkHtml}
+                    <h3 class="text-xl font-bold mb-4">🏆 Recommended Algorithms</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">${modelCards}</div>
+                    <h3 class="text-xl font-bold mb-4">⚙️ Preprocessing Pipeline</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">${prepCards}</div>
+                    <div class="glass-card p-5 rounded-xl">
+                        <h3 class="text-base font-semibold mb-3">📏 Evaluation Metrics Guide</h3>
+                        <div>${metricRows}</div>
                     </div>`;
             } catch (error) {
-                content.innerHTML = `<div class="text-center py-12 text-red-400">Failed to load image analysis: ${error.message}</div>`;
+                content.innerHTML = `<div class="text-center py-12 text-red-400">Failed to load ML recommendations: ${error.message}</div>`;
             }
         }
+
+        // ══════════════════════════════════════════════════════════════════════
+        //  IMAGE DASHBOARD FUNCTIONS
+        //  These render in #imageDashboard / #imgTabContent — completley separate
+        //  from the tabular EDA dashboard.
+        // ══════════════════════════════════════════════════════════════════════
+
+        // Helper: get cached metadata for current image dataset
+        function _imgMeta() { return datasets_meta[currentDatasetId] || {}; }
+
+        // ── Overview: class distribution + image stats ─────────────────────
+        async function loadImgOverview() {
+            const content = document.getElementById('imgTabContent');
+            const meta = _imgMeta();
+            const stats = meta.stats || {};
+            const commentary = meta.commentary || '';
+            const cdist = stats.class_distribution || {};
+
+            const classRows = Object.entries(cdist).map(([cls, cnt]) => {
+                const pct = stats.total_images ? (cnt/stats.total_images*100).toFixed(1) : 0;
+                return `<div class="flex items-center gap-3 py-1.5 border-b border-white/5">
+                    <div class="w-32 text-sm truncate text-gray-300" title="${cls}">${cls}</div>
+                    <div class="flex-1 bg-white/5 rounded-full h-2">
+                        <div class="bg-gradient-to-r from-pink-500 to-purple-500 h-2 rounded-full" style="width:${pct}%"></div>
+                    </div>
+                    <div class="w-16 text-right text-sm text-gray-400">${cnt} <span class="text-xs text-gray-500">(${pct}%)</span></div>
+                </div>`;
+            }).join('');
+
+            content.innerHTML = `
+                <h2 class="text-2xl font-bold mb-5" style="background:linear-gradient(135deg,#f093fb,#f5576c);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">
+                    Image Dataset Overview
+                </h2>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    ${[
+                        ['🖼️ Total Images', stats.total_images ?? '—'],
+                        ['🏷️ Classes', stats.num_classes ?? '—'],
+                        ['📐 Avg Size', stats.avg_width ? `${stats.avg_width}×${stats.avg_height}px` : (stats.width ? `${stats.width}×${stats.height}px` : '—')],
+                        ['⚖️ Imbalance Ratio', stats.class_imbalance_ratio ? `${stats.class_imbalance_ratio}×` : '—'],
+                    ].map(([label,val])=>`
+                        <div class="glass-card p-4 rounded-xl">
+                            <div class="text-xs text-gray-400 mb-1">${label}</div>
+                            <div class="text-xl font-bold text-pink-300">${val}</div>
+                        </div>`).join('')}
+                </div>
+                ${Object.keys(cdist).length ? `
+                <div class="glass-card p-5 rounded-xl mb-6">
+                    <h3 class="font-semibold mb-3">Class Distribution</h3>
+                    <div class="max-h-80 overflow-y-auto pr-2">${classRows}</div>
+                </div>` : ''}
+                ${commentary ? `
+                <div class="glass-card p-5 rounded-xl img-insight-card">
+                    <div class="flex items-start gap-3">
+                        <span class="text-2xl">💬</span>
+                        <div>
+                            <h4 class="font-semibold text-pink-300 mb-2">AI Augmentation Commentary</h4>
+                            <p class="text-sm text-gray-300 leading-relaxed">${commentary}</p>
+                            <p class="text-xs text-gray-500 mt-2">Generated by Llama 3.1 · 8B via Ollama</p>
+                        </div>
+                    </div>
+                </div>` : ''}
+            `;
+        }
+
+        // ── AI Content Insights: LLaVA describes what's in the images ─────
+        // This is the UNIQUE feature — LLaVA (local vision LLM) visually analyses
+        // sample images and tells you exactly what domain and content they contain.
+        async function loadImgAIInsights() {
+            const content = document.getElementById('imgTabContent');
+            content.innerHTML = `<div class="flex flex-col items-center py-16 gap-4">
+                <div class="loader-pink"></div>
+                <p class="text-pink-300 font-semibold">LLaVA is analyzing 2 representative images…</p>
+                <p class="text-gray-500 text-sm">Runs 100% locally via Ollama — takes 20–40 seconds</p>
+            </div>`;
+            try {
+                const resp = await fetch(`${API_BASE}/api/image-ai-insights/${currentDatasetId}`);
+                if (!resp.ok) {
+                    const err = await resp.json().catch(()=>({}));
+                    content.innerHTML = `<div class="text-center py-12 text-red-400">${err.detail || 'Visual analysis failed.'}</div>`;
+                    return;
+                }
+                const d = await resp.json();
+
+                // Cache domain + augmentation tips for the Augmentation tab
+                window._imgInsightsCache = window._imgInsightsCache || {};
+                window._imgInsightsCache[currentDatasetId] = d;
+
+                const sectionIcons = {
+                    'Dataset Overview':              '📊',
+                    'Visual Characteristics':        '🎨',
+                    'CV Task Recommendations':       '🤖',
+                    'Preprocessing Recommendations': '⚙️',
+                };
+
+                const insights = d.insights || [];
+                let insightHtml = '';
+
+                // First 2 sections → large gradient cards (mirrors CSV insights tab)
+                if (insights.length > 0) {
+                    insightHtml += `<div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">`;
+                    insights.slice(0, 2).forEach(sec => {
+                        const icon = sectionIcons[sec.title] || '📌';
+                        insightHtml += `
+                            <div class="glass-card p-6 rounded-2xl border-2 border-pink-500/30 bg-gradient-to-br from-pink-500/10 to-purple-500/10 hover:scale-[1.01] transition-transform duration-200">
+                                <div class="flex items-center gap-3 mb-5">
+                                    <div class="w-11 h-11 rounded-xl flex items-center justify-center text-xl flex-shrink-0" style="background:linear-gradient(135deg,#f093fb,#f5576c)">${icon}</div>
+                                    <h3 class="text-lg font-bold text-pink-300">${sec.title}</h3>
+                                </div>
+                                <div class="space-y-3">
+                                    ${(sec.items||[]).map((item,i) => `
+                                    <div class="flex items-start gap-3 p-3 bg-white/5 rounded-lg hover:bg-white/10 transition">
+                                        <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5" style="background:linear-gradient(135deg,#f093fb,#f5576c)">${i+1}</div>
+                                        <p class="text-gray-200 text-sm leading-relaxed">${item}</p>
+                                    </div>`).join('')}
+                                </div>
+                            </div>`;
+                    });
+                    insightHtml += `</div>`;
+                }
+
+                // Remaining sections → border-left cards
+                insights.slice(2).forEach(sec => {
+                    const icon = sectionIcons[sec.title] || '📌';
+                    insightHtml += `
+                        <div class="glass-card p-5 rounded-xl border-l-4 border-pink-500 mb-4 hover:border-purple-500 transition">
+                            <div class="flex items-center gap-3 mb-4">
+                                <span class="text-2xl">${icon}</span>
+                                <h3 class="text-lg font-bold text-pink-300">${sec.title}</h3>
+                            </div>
+                            <div class="space-y-2">
+                                ${(sec.items||[]).map(item => `
+                                <div class="flex items-start gap-3 pl-2">
+                                    <span class="text-pink-400 font-bold mt-1">▸</span>
+                                    <p class="text-gray-200 text-sm leading-relaxed">${item}</p>
+                                </div>`).join('')}
+                            </div>
+                        </div>`;
+                });
+
+                content.innerHTML = `
+                    <div class="mb-6">
+                        <h2 class="text-3xl font-bold mb-2 flex items-center gap-2" style="background:linear-gradient(135deg,#f093fb,#f5576c);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">
+                            <span style="-webkit-text-fill-color:initial">✨</span> AI Content Insights
+                        </h2>
+                        <p class="text-gray-400 text-sm">Powered by <span class="text-pink-400 font-semibold">LLaVA + Llama 3.1</span> — 100% local, zero quota</p>
+                    </div>
+                    ${d.domain && d.domain !== 'unknown' ? `
+                    <div class="glass-card p-4 rounded-xl mb-5 bg-pink-500/10 border border-pink-500/30 flex items-center gap-4">
+                        <span class="text-3xl">🏷️</span>
+                        <div class="flex-1">
+                            <div class="text-xs text-gray-400 mb-0.5">Detected Visual Domain</div>
+                            <div class="text-base font-bold text-pink-300">${d.domain.replace(/_/g,' ')}</div>
+                        </div>
+                        <div class="text-xs text-gray-500 text-right">Analyzed 2 sample images</div>
+                    </div>` : ''}
+                    ${insightHtml || '<p class="text-gray-400 text-sm py-8 text-center">No insights could be generated.</p>'}
+                `;
+            } catch (error) {
+                content.innerHTML = `<div class="text-center py-12 text-red-400">Vision analysis failed: ${error.message}</div>`;
+            }
+        }
+
+        // ── Augmentation Suggestions ───────────────────────────────────────
+        async function loadImgAugmentSuggestions() {
+            const content = document.getElementById('imgTabContent');
+            content.innerHTML = `<div class="flex flex-col items-center py-12 gap-3">
+                <div class="loader-pink"></div>
+                <p class="text-pink-300 text-sm">Loading domain-specific recommendations…</p>
+            </div>`;
+
+            const priorityColor = { High:'text-red-400', Medium:'text-yellow-400', Low:'text-green-400' };
+            const priorityBg    = { High:'bg-red-500/10 border-red-500/30', Medium:'bg-yellow-500/10 border-yellow-500/30', Low:'bg-green-500/10 border-green-500/30' };
+
+            // Try to load AI insights first (cached after first run — near-instant)
+            let suggestions = [];
+            let domain = null;
+            let fromAI = false;
+
+            try {
+                const cached = window._imgInsightsCache && window._imgInsightsCache[currentDatasetId];
+                if (cached) {
+                    suggestions = cached.augmentation_tips || [];
+                    domain = cached.domain;
+                    fromAI = true;
+                } else {
+                    // Silently fetch; if AI insights haven't been run yet, use static suggestions
+                    const resp = await fetch(`${API_BASE}/api/image-ai-insights/${currentDatasetId}`);
+                    if (resp.ok) {
+                        const d = await resp.json();
+                        window._imgInsightsCache = window._imgInsightsCache || {};
+                        window._imgInsightsCache[currentDatasetId] = d;
+                        suggestions = d.augmentation_tips || [];
+                        domain = d.domain;
+                        fromAI = true;
+                    }
+                }
+            } catch (_) {}
+
+            // Fallback to generic static suggestions from upload metadata
+            if (!suggestions.length) {
+                const meta = _imgMeta();
+                suggestions = meta.augmentations || [];
+            }
+
+            if (!suggestions.length) {
+                content.innerHTML = '<div class="text-center py-12 text-gray-400">No augmentation suggestions available.</div>';
+                return;
+            }
+
+            const cards = suggestions.map(s => `
+                <div class="glass-card p-5 rounded-xl aug-card border ${priorityBg[s.priority]||'border-white/10'}">
+                    <div class="flex items-start justify-between mb-2">
+                        <h3 class="font-bold text-white text-sm">${s.technique}</h3>
+                        <span class="text-xs font-bold px-2 py-0.5 rounded-full ml-2 flex-shrink-0 ${priorityColor[s.priority]||'text-gray-400'} bg-white/5">${s.priority}</span>
+                    </div>
+                    <p class="text-sm text-gray-300 mb-3 leading-relaxed">${s.reason}</p>
+                    <code class="text-xs bg-black/40 px-3 py-1.5 rounded text-green-400 font-mono block">${s.code_hint}</code>
+                </div>`).join('');
+
+            const domainBadge = (fromAI && domain && domain !== 'unknown') ? `
+                <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-pink-500/10 border border-pink-500/30 text-sm text-pink-300 mb-5">
+                    <span>🏷️</span> Tailored for <strong>${domain.replace(/_/g,' ')}</strong> dataset
+                </div>` : '';
+
+            const subtitle = fromAI
+                ? 'Domain-aware recommendations — filtered by AI-detected visual domain.'
+                : 'Based on your image statistics — run <em>AI Content Insights</em> first for domain-specific tips.';
+
+            content.innerHTML = `
+                <h2 class="text-2xl font-bold mb-2" style="background:linear-gradient(135deg,#f093fb,#f5576c);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">
+                    🛠️ Augmentation Recommendations
+                </h2>
+                <p class="text-gray-400 text-sm mb-4">${subtitle}</p>
+                ${domainBadge}
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${cards}</div>
+            `;
+        }
+
+        // ── Visual Augmentation Previews ───────────────────────────────────
+        async function loadImgPreviews() {
+            const content = document.getElementById('imgTabContent');
+            const meta = _imgMeta();
+            const allPreviews = meta.previews || [];
+
+            if (!allPreviews.length) {
+                content.innerHTML = '<div class="text-center py-12 text-gray-400">No preview images available.</div>';
+                return;
+            }
+
+            // Handle both single-image preview (flat array) and multi-image (nested array)
+            let previewBatches = [];
+            if (allPreviews[0] && allPreviews[0].name) {
+                // flat — single image
+                previewBatches = [{ filename: 'Preview', previews: allPreviews }];
+            } else {
+                previewBatches = allPreviews;
+            }
+
+            const batchHtml = previewBatches.map(batch=>{
+                const imgGrid = (batch.previews||[]).map(p=>`
+                    <div class="aug-card glass-card p-3 rounded-xl">
+                        <img src="data:image/png;base64,${p.b64}" class="w-full rounded-lg object-cover mb-2" style="max-height:180px" alt="${p.name}">
+                        <div class="text-xs text-center text-gray-300 font-semibold">${p.name}</div>
+                    </div>`).join('');
+                return `<div class="mb-8">
+                    <h3 class="font-semibold text-sm text-gray-400 mb-3">${batch.filename}</h3>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">${imgGrid}</div>
+                </div>`;
+            }).join('');
+
+            content.innerHTML = `
+                <h2 class="text-2xl font-bold mb-2" style="background:linear-gradient(135deg,#f093fb,#f5576c);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">
+                    🖼️ Augmentation Previews
+                </h2>
+                <p class="text-gray-400 text-sm mb-5">Visual previews applying each augmentation to your sample images.</p>
+                ${batchHtml}
+            `;
+        }
+
+        // ── Vision Model Recommendations ───────────────────────────────────
+        // Hardcoded recommendations for CV tasks — no API call needed.
+        // Unique because it's domain-aware (uses detected content from LLaVA).
+        async function loadImgVisionModels() {
+            const content = document.getElementById('imgTabContent');
+            const meta = _imgMeta();
+            const stats = meta.stats || {};
+            const totalImgs = stats.total_images || 1;
+            const numClasses = stats.num_classes || 2;
+            const isGray = stats.is_predominantly_grayscale || stats.is_grayscale || false;
+
+            // Choose model recommendations based on dataset size
+            const sizeLabel = totalImgs < 1000 ? 'Small (<1K)' : totalImgs < 10000 ? 'Medium (1K–10K)' : 'Large (>10K)';
+
+            const models = [
+                { name: 'MobileNetV3 (Transfer Learning)', complexity:'Low', bestFor:'Small–medium datasets, fast inference, mobile/edge deployment', pros:['Very fast','Low memory footprint','ImageNet pre-trained weights','Excellent baseline accuracy'], cons:['Less accurate than larger models on complex tasks'], framework:'torchvision.models.mobilenet_v3_small(pretrained=True)', task:'Classification' },
+                { name: 'ResNet-50 (Fine-tuning)', complexity:'Medium', bestFor:'Multi-class classification, well-studied benchmark architecture', pros:['Strong feature extractor','Excellent ImageNet weights','Widely supported','Handles up to ~1000 classes well'], cons:['Slower inference than MobileNet','Needs more GPU RAM'], framework:'torchvision.models.resnet50(pretrained=True)', task:'Classification' },
+                { name: 'EfficientNetV2-S', complexity:'Medium', bestFor:'Best accuracy/speed tradeoff, recommended for new projects in 2024-2025', pros:['State-of-the-art accuracy','Smaller than ResNet for same accuracy','Excellent for fine-tuning'], cons:['Less documentation than ResNet','Newer API'], framework:'torchvision.models.efficientnet_v2_s(pretrained=True)', task:'Classification' },
+                { name: 'YOLOv8 (Ultralytics)', complexity:'High', bestFor:'Object detection, bounding boxes, real-time inference', pros:['Best-in-class detection speed','Easy training API','Supports segmentation too'], cons:['Requires annotated bounding boxes','Heavier than classifiers'], framework:'from ultralytics import YOLO; model = YOLO("yolov8s.pt")', task:'Detection' },
+                { name: 'ViT (Vision Transformer)', complexity:'High', bestFor:'Large image datasets (>10K), when you need cutting-edge accuracy', pros:['Transformer architecture scales with data','Strong generalization','Pre-trained on ImageNet-21k'], cons:['Needs large dataset to outperform CNNs','High GPU memory'], framework:'from transformers import ViTForImageClassification', task:'Classification' },
+            ];
+
+            const augTechniques = [
+                { name:'RandomHorizontalFlip', use_when:'Natural scenes, objects — NOT medical left/right critical images', torchvision:'transforms.RandomHorizontalFlip(p=0.5)' },
+                { name:'RandomRotation', use_when:'Objects that appear in various orientations', torchvision:'transforms.RandomRotation(degrees=15)' },
+                { name:'ColorJitter', use_when:'Color-sensitive datasets, preventing color overfitting', torchvision:'transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2)' },
+                { name:'RandomCrop / CenterCrop', use_when:'When object is always near center; adds spatial robustness', torchvision:'transforms.RandomCrop(224)' },
+                { name:'Normalize', use_when:'Always — normalise to ImageNet mean/std for pre-trained models', torchvision:'transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])' },
+                ...(isGray ? [{ name:'Grayscale', use_when:'Medical or industrial images — force single channel', torchvision:'transforms.Grayscale(num_output_channels=1)' }] : []),
+                ...(stats.class_imbalance_ratio > 3 ? [{ name:'WeightedRandomSampler', use_when:'Class imbalance detected — oversample minority classes', torchvision:'torch.utils.data.WeightedRandomSampler(weights, len(dataset))' }] : []),
+            ];
+
+            const modelHtml = models.map((m,i)=>`
+                <div class="glass-card p-5 rounded-xl aug-card border border-white/10">
+                    <div class="flex items-start justify-between mb-2">
+                        <div>
+                            <h3 class="font-bold">${m.name}</h3>
+                            <span class="text-xs text-pink-400">${m.task}</span>
+                        </div>
+                        <span class="text-xs px-2 py-0.5 rounded-full bg-white/10 text-gray-300">${m.complexity}</span>
+                    </div>
+                    <p class="text-xs text-gray-400 mb-2">${m.bestFor}</p>
+                    <div class="text-xs text-green-400 mb-1">✅ ${m.pros.join(' · ')}</div>
+                    <code class="text-xs block bg-black/30 px-2 py-1.5 rounded text-purple-300 font-mono mt-2">${m.framework}</code>
+                </div>`).join('');
+
+            const augHtml = augTechniques.map(a=>`
+                <div class="bg-white/5 rounded-xl p-4 border border-white/10">
+                    <div class="font-semibold text-sm mb-1">${a.name}</div>
+                    <p class="text-xs text-gray-400 mb-2">${a.use_when}</p>
+                    <code class="text-xs text-green-400 font-mono">${a.torchvision}</code>
+                </div>`).join('');
+
+            content.innerHTML = `
+                <h2 class="text-2xl font-bold mb-2" style="background:linear-gradient(135deg,#f093fb,#f5576c);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">
+                    🤖 Vision Model & Augmentation Guide
+                </h2>
+                <p class="text-gray-400 text-sm mb-5">Dataset: <span class="text-pink-300">${sizeLabel}</span> · ${numClasses} classes · ${isGray?'Grayscale':'Colour'}</p>
+
+                <h3 class="text-lg font-bold mb-3">🏆 Recommended CV Models</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">${modelHtml}</div>
+
+                <h3 class="text-lg font-bold mb-3">🛠️ Recommended Augmentation Transforms</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${augHtml}</div>
+
+                <div class="glass-card p-5 rounded-xl mt-6 bg-pink-500/10 border border-pink-500/30">
+                    <h4 class="font-semibold text-pink-300 mb-2">💡 Quick Start Pipeline</h4>
+                    <pre class="text-xs text-green-400 font-mono bg-black/30 p-4 rounded-lg overflow-x-auto">import torchvision.transforms as T
+from torchvision import models
+import torch
+
+transform = T.Compose([
+    T.Resize((224, 224)),
+    T.RandomHorizontalFlip(),
+    T.ColorJitter(0.2, 0.2, 0.2),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+model = models.efficientnet_v2_s(pretrained=True)
+model.classifier[-1] = torch.nn.Linear(model.classifier[-1].in_features, ${numClasses})
+</pre>
+                </div>
+            `;
+        }
+
 
 
         function formatChatResponse(text) {
